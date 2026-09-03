@@ -1,0 +1,46 @@
+# ============================================================
+#  Render Blueprint for WiseProfit
+# ============================================================
+#  Apply this file from the Render dashboard ("New > Blueprint") to
+#  provision the Web Service + PostgreSQL database in a single step.
+#
+#  Manual alternative: create a Web Service manually and paste the
+#  commands listed under "services.0" below.
+# ============================================================
+services:
+  - type: web
+    name: wiseprofit
+    runtime: python
+    plan: starter           # free tier is "free"; upgrade to "starter" for always-on
+    region: oregon           # pick the region closest to your users
+    branch: main            # change if you deploy from a different branch
+    rootDir: gemini_mt5_saas # <-- IMPORTANT: points at the FastAPI package
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: GEMINI_API_KEY
+        sync: false           # you must enter this in the Render dashboard
+      - key: DATABASE_URL
+        fromService:
+          type: psql
+          name: wiseprofit-db
+          property: connectionString
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: DISABLE_BOT
+        value: "false"
+      - key: LOG_LEVEL
+        value: "INFO"
+      - key: ENV
+        value: "production"
+
+databases:
+  - name: wiseprofit-db
+    plan: free              # Render free PostgreSQL; upgrade for production SLA
+    region: oregon
+    databaseName: wiseprofit
+    user: wiseprofit_user

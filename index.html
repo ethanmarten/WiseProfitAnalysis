@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WiseProfit - AI SaaS Trading Terminal</title>
+
+  <!-- Google Fonts & FontAwesome Icons -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+
+  <style>
+    :root {
+      --bg-dark: #070b12;
+      --card-bg: #0c1322;
+      --card-border: rgba(0, 230, 153, 0.15);
+      --primary-accent: #00e699;
+      --primary-glow: rgba(0, 230, 153, 0.35);
+      --neon-cyan: #00ffa3;
+      --text-main: #f1f5f9;
+      --text-muted: #8b9bb4;
+      --dev-orange: #ff6b00;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: var(--bg-dark);
+      background-image:
+        radial-gradient(ellipse at 50% 0%, rgba(0, 230, 153, 0.12) 0%, transparent 60%),
+        radial-gradient(circle at 10% 90%, rgba(0, 184, 148, 0.08) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(16, 185, 129, 0.06) 0%, transparent 40%);
+      background-attachment: fixed;
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      overflow-x: hidden;
+      padding: 24px 32px;
+    }
+
+    .container {
+      max-width: 1300px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    /* Header Navigation */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 24px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.65rem;
+      font-weight: 800;
+      color: #ffffff;
+      letter-spacing: -0.5px;
+      cursor: pointer;
+    }
+
+    .logo span {
+      color: var(--primary-accent);
+      text-shadow: 0 0 16px rgba(0, 230, 153, 0.6);
+    }
+
+    .logo-icon {
+      width: 44px;
+      height: 44px;
+      background: radial-gradient(circle at 30% 30%, #00ffa3 0%, #00b894 100%);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #04120a;
+      font-size: 1.35rem;
+      box-shadow: 0 0 24px var(--primary-glow);
+    }
+
+    .nav-right {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0, 230, 153, 0.08);
+      border: 1px solid rgba(0, 230, 153, 0.25);
+      color: var(--primary-accent);
+      padding: 8px 18px;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      background-color: var(--primary-accent);
+      border-radius: 50%;
+      box-shadow: 0 0 12px var(--primary-accent);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0% {
+        transform: scale(0.9);
+        opacity: 0.7;
+      }
+
+      50% {
+        transform: scale(1.2);
+        opacity: 1;
+      }
+
+      100% {
+        transform: scale(0.9);
+        opacity: 0.7;
+      }
+    }
+
+    .btn-signin {
+      color: #d1d5db;
+      font-size: 0.95rem;
+      font-weight: 500;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      transition: color 0.2s ease;
+      padding: 8px 12px;
+    }
+
+    .btn-signin:hover {
+      color: #ffffff;
+    }
+
+    .btn-create-account {
+      background: #00e699;
+      color: #04120a;
+      border: none;
+      border-radius: 12px;
+      padding: 10px 22px;
+      font-family: 'Outfit', sans-serif;
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 0 20px rgba(0, 230, 153, 0.35);
+      transition: all 0.2s ease;
+    }
+
+    .btn-create-account:hover {
+      background: #00ffa3;
+      transform: translateY(-1px);
+      box-shadow: 0 0 28px rgba(0, 255, 163, 0.5);
+    }
+
+    /* Main Hero Section (Matches Image 1) */
+    .hero-container {
+      text-align: center;
+      margin: 90px auto;
+      max-width: 900px;
+    }
+
+    .hero-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 4.25rem;
+      font-weight: 800;
+      letter-spacing: -2px;
+      line-height: 1.1;
+      margin-bottom: 24px;
+      color: #ffffff;
+    }
+
+    .hero-title .glow-text {
+      color: var(--neon-cyan);
+      text-shadow:
+        0 0 20px rgba(0, 255, 163, 0.8),
+        0 0 45px rgba(0, 230, 153, 0.4);
+      display: inline-block;
+    }
+
+    .hero-subtitle {
+      font-size: 1.25rem;
+      color: var(--text-muted);
+      max-width: 720px;
+      margin: 0 auto 40px auto;
+      font-weight: 400;
+      line-height: 1.6;
+    }
+
+    .hero-prompt-text {
+      font-size: 0.95rem;
+      color: #9ca3af;
+      margin-bottom: 20px;
+    }
+
+    .btn-start-analyzing {
+      background: linear-gradient(135deg, #00ffa3 0%, #00c875 100%);
+      color: #04120a;
+      border: none;
+      border-radius: 14px;
+      padding: 16px 44px;
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.15rem;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 0 35px rgba(0, 230, 153, 0.45);
+      transition: all 0.25s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .btn-start-analyzing:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 0 45px rgba(0, 255, 163, 0.65);
+    }
+
+    /* Wave Background Graphic Effect */
+    .wave-bg {
+      position: absolute;
+      bottom: 80px;
+      left: 0;
+      width: 100%;
+      height: 200px;
+      background: radial-gradient(ellipse at 50% 100%, rgba(0, 230, 153, 0.15) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: -1;
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding-top: 32px;
+      padding-bottom: 12px;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      font-size: 0.85rem;
+      color: #6b7280;
+    }
+
+    /* Modal Overlay */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(4, 8, 15, 0.85);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      z-index: 1000;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+
+    /* Auth Card (Matches Image 2 & Image 3) */
+    .auth-card {
+      background: var(--card-bg);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 28px;
+      width: 100%;
+      max-width: 440px;
+      padding: 40px 36px 28px 36px;
+      box-shadow: 0 25px 60px rgba(0, 0, 0, 0.7);
+      text-align: center;
+      position: relative;
+      animation: modalFadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes modalFadeIn {
+      from {
+        opacity: 0;
+        transform: scale(0.95) translateY(10px);
+      }
+
+      to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+      }
+    }
+
+    .auth-star-badge {
+      width: 48px;
+      height: 48px;
+      background: rgba(0, 230, 153, 0.08);
+      border: 1px solid rgba(0, 230, 153, 0.2);
+      border-radius: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 20px auto;
+      font-size: 1.4rem;
+      color: var(--neon-cyan);
+      box-shadow: 0 0 20px rgba(0, 255, 163, 0.2);
+    }
+
+    .auth-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #ffffff;
+      margin-bottom: 8px;
+    }
+
+    .auth-subtitle {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      margin-bottom: 28px;
+    }
+
+    /* Google Button */
+    .btn-google {
+      width: 100%;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
+      padding: 13px;
+      color: #e2e8f0;
+      font-size: 0.95rem;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      margin-bottom: 20px;
+    }
+
+    .btn-google:hover {
+      background: rgba(255, 255, 255, 0.06);
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+
+    /* Divider */
+    .divider {
+      display: flex;
+      align-items: center;
+      text-align: center;
+      color: #4b5563;
+      font-size: 0.85rem;
+      margin-bottom: 20px;
+    }
+
+    .divider::before,
+    .divider::after {
+      content: '';
+      flex: 1;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .divider span {
+      padding: 0 14px;
+    }
+
+    /* Form Elements */
+    .form-group {
+      text-align: left;
+      margin-bottom: 20px;
+    }
+
+    .form-group label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: #d1d5db;
+      margin-bottom: 8px;
+    }
+
+    .form-control-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .form-control {
+      width: 100%;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 13px 40px 13px 16px;
+      color: #ffffff;
+      font-size: 0.95rem;
+      outline: none;
+      transition: all 0.2s ease;
+    }
+
+    .form-control:focus {
+      border-color: var(--primary-accent);
+      box-shadow: 0 0 14px rgba(0, 230, 153, 0.2);
+    }
+
+    .toggle-eye-icon {
+      position: absolute;
+      right: 14px;
+      color: #6b7280;
+      cursor: pointer;
+      font-size: 0.95rem;
+      transition: color 0.2s ease;
+    }
+
+    .toggle-eye-icon:hover {
+      color: #9ca3af;
+    }
+
+    .btn-continue {
+      width: 100%;
+      background: linear-gradient(135deg, #00ffa3 0%, #00c875 100%);
+      color: #04120a;
+      border: none;
+      border-radius: 14px;
+      padding: 14px;
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.05rem;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      box-shadow: 0 0 25px rgba(0, 230, 153, 0.35);
+      transition: all 0.2s ease;
+      margin-top: 8px;
+      margin-bottom: 24px;
+    }
+
+    .btn-continue:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 0 35px rgba(0, 255, 163, 0.55);
+    }
+
+    .auth-switch-text {
+      font-size: 0.88rem;
+      color: var(--text-muted);
+      margin-bottom: 20px;
+    }
+
+    .auth-switch-text span {
+      color: var(--primary-accent);
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .auth-switch-text span:hover {
+      text-decoration: underline;
+    }
+
+    .dev-mode-tag {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--dev-orange);
+      letter-spacing: 0.5px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="container">
+    <!-- Header Navigation -->
+    <header>
+      <div class="logo" onclick="openAuthModal('signin')" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault(); openAuthModal('signin');}">
+        <div class="logo-icon"><i class="fa-solid fa-brain"></i></div>
+        Wise<span>Profit</span>
+      </div>
+
+      <div class="nav-right">
+        <div class="status-badge">
+          <div class="status-dot"></div>
+          <span>SYSTEM ONLINE</span>
+        </div>
+
+        <button class="btn-signin" onclick="openAuthModal('signin')">Sign in</button>
+        <button class="btn-create-account" onclick="openAuthModal('signup')">Create account</button>
+      </div>
+    </header>
+
+    <!-- Main Hero Section (Matches Image 1) -->
+    <div class="hero-container">
+      <h1 class="hero-title">Trade with <span class="glow-text">Precision</span></h1>
+      <p class="hero-subtitle">
+        Enter any asset symbol to instantly receive AI-driven technical analysis, support/resistance levels, and
+        calculated trade entries.
+      </p>
+
+      <p class="hero-prompt-text">Sign in to run analyses and keep your private trading history.</p>
+
+      <button class="btn-start-analyzing" onclick="openAuthModal('signin')">
+        Start analyzing
+      </button>
+    </div>
+  </div>
+
+  <div class="wave-bg"></div>
+
+  <!-- Footer -->
+  <footer>
+    &copy; 2026 WiseProfit Trading Terminal. Powered by Replit AI Integrations.
+  </footer>
+
+  <!-- Auth Modal (Matches Image 2 & Image 3) -->
+  <div class="modal-overlay" id="authModal">
+    <div class="auth-card">
+      <i class="fa-solid fa-xmark" style="position: absolute; top: 20px; right: 24px; color: var(--text-muted); cursor: pointer; font-size: 1.2rem;" onclick="document.getElementById('authModal').style.display = 'none'" role="button" tabindex="0" aria-label="Close modal" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault(); document.getElementById('authModal').style.display = 'none';}"></i>
+
+      <div class="auth-star-badge">
+        <i class="fa-solid fa-star"></i>
+      </div>
+
+      <!-- Sign Up Title & Subtitle -->
+      <div id="signupHeader">
+        <h2 class="auth-title">Create your WiseProfit account</h2>
+        <p class="auth-subtitle">Save and revisit your trading analyses securely</p>
+      </div>
+
+      <!-- Sign In Title & Subtitle -->
+      <div id="signinHeader" style="display: none;">
+        <h2 class="auth-title">Welcome back to WiseProfit</h2>
+        <p class="auth-subtitle">Sign in to access your private trading workspace</p>
+      </div>
+
+      <!-- Continue with Google Button -->
+      <button type="button" class="btn-google" onclick="handleLoginSubmit(event)">
+        <svg width="18" height="18" viewBox="0 0 24 24">
+          <path fill="#4285F4"
+            d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+          <path fill="#34A853"
+            d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+          <path fill="#FBBC05"
+            d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+          <path fill="#EA4335"
+            d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+        </svg>
+        Continue with Google
+      </button>
+
+      <div class="divider">
+        <span>or</span>
+      </div>
+
+      <form id="authForm" onsubmit="handleLoginSubmit(event)">
+        <div class="form-group">
+          <label>
+            <span>Email address</span>
+            <span id="lastUsedTag" style="display:none; color:var(--text-muted); font-size:0.78rem;">Last used</span>
+          </label>
+          <input type="email" id="authEmailInput" class="form-control" placeholder="Enter your email address"
+            value="ehabalhayekm@gmail.com" required />
+        </div>
+
+        <div class="form-group" id="passwordGroup">
+          <label>
+            <span>Password</span>
+            <span style="color:var(--text-muted); font-size:0.75rem;">(optional)</span>
+          </label>
+          <div class="form-control-wrapper">
+            <input type="password" id="authPasswordInput" class="form-control" placeholder="Create a password"
+              autocomplete="off" />
+            <i class="fa-regular fa-eye toggle-eye-icon" id="togglePasswordIcon"
+              onclick="togglePasswordVisibility()"></i>
+          </div>
+        </div>
+
+        <button type="submit" class="btn-continue">
+          Continue &nbsp;&#9654;
+        </button>
+      </form>
+
+      <div class="auth-switch-text" id="signupSwitch">
+        Already have an account? <span onclick="switchAuthMode('signin')">Sign in</span>
+      </div>
+
+      <div class="auth-switch-text" id="signinSwitch" style="display: none;">
+        Don't have an account? <span onclick="switchAuthMode('signup')">Sign up</span>
+      </div>
+
+      <div class="dev-mode-tag">Development mode</div>
+
+    </div>
+  </div>
+
+  <script>
+    let currentAuthMode = 'signin';
+
+    function openAuthModal(mode) {
+      currentAuthMode = mode;
+      switchAuthMode(mode);
+      document.getElementById('authModal').style.display = 'flex';
+    }
+
+    function switchAuthMode(mode) {
+      currentAuthMode = mode;
+      if (mode === 'signin') {
+        document.getElementById('signupHeader').style.display = 'none';
+        document.getElementById('signinHeader').style.display = 'block';
+        document.getElementById('signupSwitch').style.display = 'none';
+        document.getElementById('signinSwitch').style.display = 'block';
+        document.getElementById('lastUsedTag').style.display = 'inline';
+        document.getElementById('authPasswordInput').placeholder = 'Enter password (optional)';
+      } else {
+        document.getElementById('signupHeader').style.display = 'block';
+        document.getElementById('signinHeader').style.display = 'none';
+        document.getElementById('signupSwitch').style.display = 'block';
+        document.getElementById('signinSwitch').style.display = 'none';
+        document.getElementById('lastUsedTag').style.display = 'none';
+        document.getElementById('authPasswordInput').placeholder = 'Create a password (optional)';
+      }
+    }
+
+    function togglePasswordVisibility() {
+      const pwdInput = document.getElementById('authPasswordInput');
+      const icon = document.getElementById('togglePasswordIcon');
+      if (pwdInput.type === 'password') {
+        pwdInput.type = 'text';
+        icon.classList.remove('fa-eye');
+        icon.classList.add('fa-eye-slash');
+      } else {
+        pwdInput.type = 'password';
+        icon.classList.remove('fa-eye-slash');
+        icon.classList.add('fa-eye');
+      }
+    }
+
+    async function handleLoginSubmit(e) {
+      if (e) e.preventDefault();
+      const email = document.getElementById('authEmailInput').value.trim() || "ehabalhayekm@gmail.com";
+      const password = document.getElementById('authPasswordInput').value;
+
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email, password: password })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          localStorage.setItem('user_email', data.email);
+          localStorage.setItem('user_id', data.user_id);
+          window.location.href = '/dashboard';
+        } else {
+          localStorage.setItem('user_email', email);
+          window.location.href = '/dashboard';
+        }
+      } catch (err) {
+        localStorage.setItem('user_email', email);
+        window.location.href = '/dashboard';
+      }
+    }
+
+    // Close modal on background click
+    document.getElementById('authModal').addEventListener('click', (e) => {
+      if (e.target.classList.contains('modal-overlay')) {
+        document.getElementById('authModal').style.display = 'none';
+      }
+    });
+  </script>
+</body>
+
+</html>

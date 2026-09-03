@@ -1,0 +1,27 @@
+# WiseProfit Production Dependencies (Render-compatible)
+
+# --- Web Framework ---
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+python-multipart>=0.0.6
+
+# --- Database ---
+sqlalchemy>=2.0.0
+# PostgreSQL driver (used when DATABASE_URL is set to a postgres:// URL on Render)
+psycopg2-binary>=2.9.9
+
+# --- AI ---
+google-genai>=0.1.1
+
+# --- Validation ---
+pydantic>=2.0.0
+
+# --- HTTP & Config ---
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# --- Trading Execution ---
+metaapi-cloud-sdk>=23.1.0
+
+# --- Production Server (optional, for `gunicorn`-style deployments) ---
+# gunicorn>=21.2.0
