@@ -196,21 +196,35 @@ class ToggleBotRequest(BaseModel):
 
 # --- REST API Endpoints ---
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=FileResponse)
 async def serve_landing_page():
-    """Serves the main landing page with Sign-In / Create Account modals."""
+    """Serves the main landing page with Sign-In / Create Account modals.
+
+    Uses FastAPI's FileResponse so the framework computes Content-Length from
+    the actual file size and streams the body cleanly. This avoids the
+    "RuntimeError: Response content longer than Content-Length" that occurs
+    when raw HTMLResponse bodies drift in size vs. an outdated header.
+    """
     index_path = os.path.join(os.path.dirname(__file__), "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path, media_type="text/html")
+    # Fallback handled outside FileResponse to keep header math intact.
     return HTMLResponse("<h1>WiseProfit</h1><p>Landing page not available.</p>")
 
 
-@app.get("/dashboard", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=FileResponse)
 async def serve_dashboard():
-    """Serves the main trading dashboard HTML file."""
+    """Serves the main trading dashboard HTML file.
+
+    Uses FastAPI's FileResponse so the framework computes Content-Length from
+    the actual file size and streams the body cleanly. This avoids the
+    "RuntimeError: Response content longer than Content-Length" that occurs
+    when raw HTMLResponse bodies drift in size vs. an outdated header.
+    """
     dashboard_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
     if os.path.exists(dashboard_path):
         return FileResponse(dashboard_path, media_type="text/html")
+    # Fallback handled outside FileResponse to keep header math intact.
     return HTMLResponse("<h1>WiseProfit Dashboard</h1><p>Dashboard not available.</p>")
 
 

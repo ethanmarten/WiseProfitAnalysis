@@ -1631,9 +1631,11 @@
     });
 
     // Real-Time Live Market Polling
+    // Throttled to 3000ms (was 2500ms) to reduce CPU load on Render while
+    // still keeping the header price tag in sync with the latest candle close.
     setInterval(() => {
       updateLiveMarketTicker(currentSymbol);
-    }, 2500);
+    }, 3000);
 
     // Initial Loading Calls
     window.addEventListener('DOMContentLoaded', () => {
