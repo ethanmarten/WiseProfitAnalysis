@@ -20,6 +20,9 @@ pydantic>=2.0.0
 requests>=2.31.0
 python-dotenv>=1.0.0
 
+# --- Security (password hashing helpers + credential encryption at rest) ---
+cryptography>=42.0.0
+
 # --- Trading Execution ---
 metaapi-cloud-sdk>=23.1.0
 

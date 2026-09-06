@@ -34,4 +34,5 @@ Thumbs.db
 logs/
 
 # Render build cache
-.render-build-cache/
+.render-build-cache/.secret_key 
+static/ 

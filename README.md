@@ -29,9 +29,12 @@ gemini_mt5_saas/
 ├── main.py                # FastAPI server, REST API endpoints, and 24/7 background AI engine loop
 ├── gemini_analyzer.py     # Gemini AI client, SMC prompt engineering, and JSON signal parser
 ├── mt5_executor.py        # MetaApi Cloud SDK integration, position execution, SL/TP management
-├── database.py            # SQLAlchemy models (User, MT5Account, DailyProfitTracker, TradeLog)
+├── database.py            # SQLAlchemy models (User, MT5Account, DailyProfitTracker, TradeLog, PendingSignal)
 ├── news_filter.py         # Economic calendar evaluator (high-impact news guard)
+├── auth.py / security.py  # Bearer-token auth + at-rest credential encryption
 ├── dashboard.html         # Responsive frontend web dashboard
+├── bridge/
+│   └── local_mt5_bot.py   # Optional: Windows MT5 executor that consumes /api/signals
 ├── requirements.txt       # Python dependencies
 └── README.md              # Project documentation
 ```
@@ -67,3 +70,37 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 1. Open your browser and navigate to `http://localhost:8000`.
 2. Input your **User Email**, **MetaApi Token**, **Account ID**, **MT5 Login**, **Password**, and **Broker Server**.
 3. Click **Save & Connect 24/7 Bot**. The system will start analyzing Gold (XAUUSD) and trading automatically!
+
+---
+
+## 🌉 Bridge Mode (Local Windows MT5 + Render AI)
+
+By default the Render server analyzes markets **and** executes trades through
+MetaApi Cloud. If your broker blocks MetaApi — or you simply prefer executing
+on your local Windows MT5 terminal — switch the system to **Bridge Mode**.
+
+1. **On Render**, set the environment variable:
+   ```
+   BRIDGE_MODE=true
+   ```
+   Then redeploy. The Render engine will keep producing Gemini signals, but
+   instead of calling MetaApi it queues each signal in the `pending_signals`
+   table with a 90-second TTL.
+
+2. **On your Windows PC** (where MT5 is already installed and logged in):
+   ```powershell
+   cd bridge
+   pip install MetaTrader5 requests python-dotenv
+   copy .env.example .env
+   # edit .env and set WP_EMAIL, WP_PASSWORD, MT5_SYMBOL
+   python local_mt5_bot.py
+   ```
+
+3. The bot signs in to your WiseProfit dashboard, polls
+   `GET /api/signals/pending`, claims each signal with a one-shot token,
+   places the order via `MetaTrader5.order_send`, then POSTs the result back
+   to `POST /api/signals/{id}/ack`. The dashboard's audit log shows every
+   trade as if Render had executed it itself.
+
+> **Tip:** to disable bridge mode, set `BRIDGE_MODE=false` (or remove the
+> var) on Render and the bot will go back to using MetaApi directly.

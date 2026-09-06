@@ -14,7 +14,7 @@ services:
     plan: starter           # free tier is "free"; upgrade to "starter" for always-on
     region: oregon           # pick the region closest to your users
     branch: main            # change if you deploy from a different branch
-    rootDir: gemini_mt5_saas # <-- IMPORTANT: points at the FastAPI package
+    # The FastAPI app lives at the repository root, so no rootDir is needed.
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /healthz
@@ -24,6 +24,8 @@ services:
         value: "3.11.9"
       - key: GEMINI_API_KEY
         sync: false           # you must enter this in the Render dashboard
+      - key: SECRET_KEY
+        generateValue: true   # signs sessions and encrypts stored MT5 credentials
       - key: DATABASE_URL
         fromService:
           type: psql
@@ -37,6 +39,14 @@ services:
         value: "INFO"
       - key: ENV
         value: "production"
+      - key: ALLOW_MOCK_TRADING
+        value: "false"
+      - key: NEWS_FILTER_FAIL_OPEN
+        value: "false"
+      - key: BRIDGE_MODE
+        value: "false"
+      - key: PENDING_SIGNAL_TTL_SECONDS
+        value: "90"
 
 databases:
   - name: wiseprofit-db

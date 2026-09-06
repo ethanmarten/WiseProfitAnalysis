@@ -6,6 +6,7 @@ instructing Gemini to detect Liquidity Sweeps, Change of Character (CHoCH), and 
 and returns structured JSON signals.
 """
 
+import asyncio
 import os
 import json
 import logging
@@ -15,6 +16,13 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("gemini_analyzer")
+
+# Model is configurable so a deprecated default never silently breaks the bot.
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+# Minimum acceptable risk-to-reward ratio enforced locally, independent of what
+# the model claims in its response.
+MIN_RISK_REWARD = float(os.getenv("MIN_RISK_REWARD", "1.8"))
 
 # Define Pydantic schema for strict Gemini JSON structured output
 class SMCTradeSignal(BaseModel):
@@ -31,14 +39,14 @@ class SMCTradeSignal(BaseModel):
 class GeminiSMCAnalyzer:
     """Gemini AI market analyzer enforcing SMC/ICT trading methodology."""
 
-    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-3.6-flash"):
+    def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         if not self._is_valid_key(self.api_key):
             logger.warning("GEMINI_API_KEY is missing or set to placeholder. Analyzer will return HOLD.")
             self.client = None
         else:
             self.client = genai.Client(api_key=self.api_key)
-        self.model_name = model_name
+        self.model_name = model_name or DEFAULT_MODEL
 
     def _is_valid_key(self, key: Optional[str]) -> bool:
         """Helper to verify key is present and not a placeholder."""
@@ -92,6 +100,13 @@ class GeminiSMCAnalyzer:
                 "reasoning": "GEMINI_API_KEY is missing or invalid placeholder in .env. Please set a valid Gemini API key from AI Studio."
             }
 
+        if not m1_candles and not m5_candles and not m15_candles:
+            return {
+                "action": "HOLD",
+                "confidence": 0.0,
+                "reasoning": "No candle data available for analysis; refusing to trade blind.",
+            }
+
         m1_text = self.format_candles_summary(m1_candles)
         m5_text = self.format_candles_summary(m5_candles)
         m15_text = self.format_candles_summary(m15_candles)
@@ -127,19 +142,24 @@ class GeminiSMCAnalyzer:
         """
 
         try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    response_mime_type="application/json",
-                    response_schema=SMCTradeSignal,
-                    temperature=0.1,  # Low temperature for deterministic analysis
-                ),
+            # google-genai's generate_content is blocking; run it off the event
+            # loop so the 24/7 trading engine and API requests are not stalled.
+            response = await asyncio.to_thread(
+                lambda: self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=SMCTradeSignal,
+                        temperature=0.1,  # Low temperature for deterministic analysis
+                    ),
+                )
             )
 
             raw_json = response.text
             signal_data = json.loads(raw_json)
+            signal_data.setdefault("reasoning", "")
 
             # Extra sanity check for Gold (XAUUSD) SL/TP boundaries
             action = signal_data.get("action", "HOLD").upper()
@@ -148,15 +168,28 @@ class GeminiSMCAnalyzer:
                 sl = signal_data.get("stop_loss")
                 tp = signal_data.get("take_profit")
 
+                def reject(message: str) -> None:
+                    signal_data["action"] = "HOLD"
+                    signal_data["reasoning"] += f" [Rejected: {message}]"
+
                 if not sl or not tp:
-                    signal_data["action"] = "HOLD"
-                    signal_data["reasoning"] += " [Rejected: Missing SL or TP values]"
+                    reject("Missing SL or TP values")
                 elif action == "BUY" and (sl >= entry or tp <= entry):
-                    signal_data["action"] = "HOLD"
-                    signal_data["reasoning"] += " [Rejected: Invalid BUY SL/TP geometry]"
+                    reject("Invalid BUY SL/TP geometry")
                 elif action == "SELL" and (sl <= entry or tp >= entry):
-                    signal_data["action"] = "HOLD"
-                    signal_data["reasoning"] += " [Rejected: Invalid SELL SL/TP geometry]"
+                    reject("Invalid SELL SL/TP geometry")
+                else:
+                    # Independently verify the risk-to-reward ratio rather than
+                    # trusting the model's self-reported number.
+                    risk = abs(entry - sl)
+                    reward = abs(tp - entry)
+                    if risk <= 0:
+                        reject("Zero-distance stop loss")
+                    else:
+                        actual_rr = reward / risk
+                        signal_data["risk_reward_ratio"] = round(actual_rr, 2)
+                        if actual_rr < MIN_RISK_REWARD:
+                            reject(f"Risk-reward {actual_rr:.2f} below minimum {MIN_RISK_REWARD}")
 
             return signal_data
 

@@ -1070,7 +1070,8 @@
       <form id="credentialsForm" autocomplete="off">
         <div class="form-group">
           <label>User Email</label>
-          <input type="email" id="email" class="form-control" required value="ehabalhayekm@gmail.com" />
+          <!-- Read-only: the account is taken from the authenticated session, not this field. -->
+          <input type="email" id="email" class="form-control" readonly disabled />
         </div>
         <div class="form-group">
           <label>MetaApi API Token</label>
@@ -1100,7 +1101,7 @@
   </div>
 
   <script>
-    let currentUserId = 1;
+    let currentUserId = null;
     let currentSymbol = "XAUUSD";
     let currentTimeframe = "5";
     let tvWidget = null;
@@ -1111,6 +1112,38 @@
     let headerPriceValue = 0;            // Synced live candle close (chart reference)
     let activeTradeLevels = null;        // {ep, sl, tp, side, lots, profit} or null
     let priceScaleBounds = null;         // {low, high} cached for the trade visualizer Y-axis
+
+    // --- Authenticated fetch helper -------------------------------------
+    // Every private endpoint requires the bearer token issued at sign-in.
+    // A 401 means the session expired, so the user is returned to the login page.
+    function getAuthToken() {
+      return localStorage.getItem('access_token');
+    }
+
+    function redirectToLogin() {
+      localStorage.removeItem('user_email');
+      localStorage.removeItem('user_id');
+      localStorage.removeItem('access_token');
+      window.location.href = '/';
+    }
+
+    async function authFetch(url, options = {}) {
+      const token = getAuthToken();
+      if (!token) {
+        redirectToLogin();
+        throw new Error('Not authenticated');
+      }
+      const headers = Object.assign(
+        { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        options.headers || {}
+      );
+      const res = await fetch(url, Object.assign({}, options, { headers }));
+      if (res.status === 401) {
+        redirectToLogin();
+        throw new Error('Session expired');
+      }
+      return res;
+    }
 
     // Format a price consistently across the dashboard
     function fmtPrice(p) {
@@ -1375,16 +1408,17 @@
       btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Analyzing...';
 
       try {
-        const res = await fetch('/api/analyze-symbol', {
+        const res = await authFetch('/api/analyze-symbol', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol: currentSymbol, user_id: currentUserId })
+          body: JSON.stringify({ symbol: currentSymbol })
         });
         const data = await res.json();
 
         if (res.ok) {
           displayAIAnalysisResult(data);
           fetchDashboardData();
+        } else {
+          alert(data.detail || 'Analysis failed. Please try again.');
         }
       } catch (err) {
         console.error('Error analyzing symbol:', err);
@@ -1465,7 +1499,8 @@
     // Fetch Dashboard SaaS Data
     async function fetchDashboardData() {
       try {
-        const res = await fetch(`/api/dashboard/${currentUserId}`);
+        if (!currentUserId) return;
+        const res = await authFetch(`/api/dashboard/${currentUserId}`);
         if (!res.ok) return;
         const data = await res.json();
 
@@ -1474,11 +1509,12 @@
         document.getElementById('dailyPnl').innerText = `$${pnl.toFixed(2)}`;
         document.getElementById('dailyPnl').style.color = pnl >= 0 ? 'var(--primary-accent)' : 'var(--danger)';
 
-        const capPercent = Math.min(100, Math.max(0, (pnl / 100.0) * 100));
+        const target = data.daily_profit_target || 100.0;
+        const capPercent = Math.min(100, Math.max(0, (pnl / target) * 100));
         document.getElementById('pnlProgressBar').style.width = `${capPercent}%`;
 
         if (data.target_cap_reached) {
-          document.getElementById('pnlCapSubtitle').innerText = '🎉 $100 DAILY PROFIT TARGET REACHED! (Locked Today)';
+          document.getElementById('pnlCapSubtitle').innerText = `🎉 $${target.toFixed(0)} DAILY PROFIT TARGET REACHED! (Locked Today)`;
         }
 
         // Live Bot Activity Status
@@ -1590,17 +1626,19 @@
     function openMT5Modal() { document.getElementById('mt5Modal').style.display = 'flex'; }
     function closeMT5Modal() { document.getElementById('mt5Modal').style.display = 'none'; }
 
-    function signOutUser() {
-      localStorage.removeItem('user_email');
-      localStorage.removeItem('user_id');
-      window.location.href = '/';
+    async function signOutUser() {
+      try {
+        await authFetch('/api/logout', { method: 'POST' });
+      } catch (err) {
+        // Token already invalid; the local cleanup below is what matters.
+      }
+      redirectToLogin();
     }
 
     // MT5 Credentials Form Submission
     document.getElementById('credentialsForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const data = {
-        email: document.getElementById('email').value,
         meta_api_token: document.getElementById('metaApiToken').value,
         account_id: document.getElementById('accountId').value,
         login: document.getElementById('login').value,
@@ -1610,20 +1648,19 @@
       };
 
       try {
-        const res = await fetch('/api/register-account', {
+        const res = await authFetch('/api/register-account', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(data)
         });
         const result = await res.json();
         if (res.ok) {
-          alert('MT5 Credentials Saved! 24/7 Gemini Cloud Bot is Active.');
+          alert(result.message || 'MT5 credentials saved.');
           currentUserId = result.user_id;
           document.getElementById('userEmailDisplay').innerText = result.email;
           closeMT5Modal();
           fetchDashboardData();
         } else {
-          alert('Error: ' + result.detail);
+          alert('Error: ' + (result.detail || 'Could not save credentials.'));
         }
       } catch (err) {
         alert('Failed to connect to server: ' + err.message);
@@ -1638,15 +1675,30 @@
     }, 3000);
 
     // Initial Loading Calls
-    window.addEventListener('DOMContentLoaded', () => {
-      const storedEmail = localStorage.getItem('user_email');
-      const storedUserId = localStorage.getItem('user_id');
-      if (storedEmail) {
-        document.getElementById('userEmailDisplay').innerText = storedEmail;
+    window.addEventListener('DOMContentLoaded', async () => {
+      if (!getAuthToken()) {
+        redirectToLogin();
+        return;
       }
-      if (storedUserId) {
-        currentUserId = parseInt(storedUserId) || 1;
+
+      // Confirm the token with the server rather than trusting localStorage.
+      try {
+        const meRes = await authFetch('/api/me');
+        if (!meRes.ok) {
+          redirectToLogin();
+          return;
+        }
+        const me = await meRes.json();
+        currentUserId = me.user_id;
+        localStorage.setItem('user_id', me.user_id);
+        localStorage.setItem('user_email', me.email);
+        document.getElementById('userEmailDisplay').innerText = me.email;
+        const emailField = document.getElementById('email');
+        if (emailField) emailField.value = me.email;
+      } catch (err) {
+        return; // authFetch already redirected.
       }
+
       updateLiveMarketTicker('XAUUSD');
       fetchDashboardData().then(() => {
         if (!hasLoadedInitialAnalysis) {
