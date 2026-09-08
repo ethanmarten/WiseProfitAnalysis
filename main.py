@@ -27,12 +27,13 @@ try:
 except ImportError:
     pass
 
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, status
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, status, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+import json
 
 from database import (
     SessionLocal, init_db, get_db, User, MT5Account, DailyProfitTracker, TradeLog,
@@ -41,8 +42,9 @@ from database import (
 from gemini_analyzer import GeminiSMCAnalyzer
 from mt5_executor import MetaApiMT5Executor, get_executor
 from news_filter import EconomicNewsFilter
-from security import hash_password, verify_password
+from security import hash_password, verify_password, hash_token
 from auth import create_session, revoke_session, current_user, authorize_user_id
+from google.genai import types
 
 from contextlib import asynccontextmanager
 
@@ -74,6 +76,10 @@ ENGINE_INTERVAL_SECONDS = int(os.getenv("ENGINE_INTERVAL_SECONDS", "60"))
 # companion script) claims and executes them. Set to false (default) so the
 # server executes trades directly via MetaApi as before.
 BRIDGE_MODE = os.getenv("BRIDGE_MODE", "false").lower() == "true"
+
+# Trading mode: AUTO = engine executes trades automatically, MANUAL = engine
+# produces signals and waits for user approval/rejection before executing
+TRADING_MODE = os.getenv("TRADING_MODE", "AUTO").upper()
 PENDING_SIGNAL_TTL_SECONDS = int(os.getenv("PENDING_SIGNAL_TTL_SECONDS", "90"))
 
 # ---------------------------------------------------------------------------
@@ -99,6 +105,134 @@ BOT_LIVE_STATUS = {
     "detail": "Background Gemini AI SaaS Trading Engine ready.",
     "updated_at": datetime.now().strftime("%H:%M:%S")
 }
+
+# ---------------------------------------------------------------------------
+# WebSocket Connection Manager for Real-time Notifications
+# ---------------------------------------------------------------------------
+class ConnectionManager:
+    """Manages active WebSocket connections per user for real-time updates."""
+    
+    def __init__(self):
+        self.active_connections: Dict[int, List[WebSocket]] = {}
+    
+    async def connect(self, websocket: WebSocket, user_id: int):
+        await websocket.accept()
+        if user_id not in self.active_connections:
+            self.active_connections[user_id] = []
+        self.active_connections[user_id].append(websocket)
+        logger.info(f"WebSocket connected for user {user_id}. Total connections: {len(self.active_connections[user_id])}")
+    
+    def disconnect(self, websocket: WebSocket, user_id: int):
+        if user_id in self.active_connections:
+            self.active_connections[user_id].remove(websocket)
+            if not self.active_connections[user_id]:
+                del self.active_connections[user_id]
+        logger.info(f"WebSocket disconnected for user {user_id}")
+    
+    async def send_personal_message(self, message: dict, user_id: int):
+        """Send a message to all connections of a specific user."""
+        if user_id in self.active_connections:
+            disconnected = []
+            for connection in self.active_connections[user_id]:
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    logger.warning(f"Failed to send message to user {user_id}: {e}")
+                    disconnected.append(connection)
+            
+            # Clean up disconnected connections
+            for conn in disconnected:
+                self.disconnect(conn, user_id)
+    
+    async def broadcast(self, message: dict):
+        """Broadcast message to all connected users."""
+        for user_id, connections in self.active_connections.items():
+            await self.send_personal_message(message, user_id)
+
+
+manager = ConnectionManager()
+
+
+async def notify_user(user_id: int, notification: dict):
+    """Helper to send notification to a specific user via WebSocket."""
+    await manager.send_personal_message(notification, user_id)
+
+
+async def notify_trade_executed(user_id: int, trade_data: dict):
+    """Send trade execution notification."""
+    notification = {
+        "type": "trade_executed",
+        "title": "✅ تم تنفيذ صفقة جديدة",
+        "message": f"تم فتح صفقة {trade_data.get('action', 'BUY')} {trade_data.get('symbol', 'XAUUSD')} بحجم {trade_data.get('lots', 0.01)} لوت",
+        "data": trade_data,
+        "timestamp": datetime.now().isoformat()
+    }
+    await notify_user(user_id, notification)
+
+
+async def notify_signal_generated(user_id: int, signal_data: dict):
+    """Send new signal notification."""
+    notification = {
+        "type": "signal_generated",
+        "title": "🎯 إشارة تداول جديدة",
+        "message": f"إشارة {signal_data.get('action', 'BUY')} على {signal_data.get('symbol', 'XAUUSD')} - ثقة: {signal_data.get('confidence', 0)*100:.0f}%",
+        "data": signal_data,
+        "timestamp": datetime.now().isoformat()
+    }
+    await notify_user(user_id, notification)
+
+
+async def notify_profit_update(user_id: int, pnl_data: dict):
+    """Send PnL update notification."""
+    notification = {
+        "type": "profit_update",
+        "title": "💰 تحديث الأرباح",
+        "message": f"PnL اليومي: ${pnl_data.get('total_pnl', 0):.2f} | صفقات: {pnl_data.get('daily_setup_count', 0)}/{MAX_DAILY_SETUPS}",
+        "data": pnl_data,
+        "timestamp": datetime.now().isoformat()
+    }
+    await notify_user(user_id, notification)
+
+
+async def notify_daily_limit_reached(user_id: int, limit_type: str):
+    """Send daily limit reached notification."""
+    messages = {
+        "profit": f"🎉 تم تحقيق الهدف اليومي ${DAILY_PROFIT_TARGET}! تم إيقاف التداول لليوم.",
+        "setups": f"⚠️ تم الوصول للحد الأقصى للصفقات اليومية ({MAX_DAILY_SETUPS})."
+    }
+    notification = {
+        "type": "daily_limit",
+        "title": "تنبيه حد يومي",
+        "message": messages.get(limit_type, "تم الوصول لحد يومي"),
+        "data": {"limit_type": limit_type},
+        "timestamp": datetime.now().isoformat()
+    }
+    await notify_user(user_id, notification)
+
+
+async def notify_news_blackout(user_id: int, event_title: str):
+    """Send news blackout notification."""
+    notification = {
+        "type": "news_blackout",
+        "title": "📰 منطقة أخبار عالية التأثير",
+        "message": f"تم إيقاف التداول مؤقتاً: {event_title}",
+        "data": {"event": event_title},
+        "timestamp": datetime.now().isoformat()
+    }
+    await notify_user(user_id, notification)
+
+
+async def notify_error(user_id: int, error_message: str):
+    """Send error notification."""
+    notification = {
+        "type": "error",
+        "title": "❌ خطأ",
+        "message": error_message,
+        "data": {},
+        "timestamp": datetime.now().isoformat()
+    }
+    await notify_user(user_id, notification)
+
 
 def update_bot_status(step: str, detail: str):
     global BOT_LIVE_STATUS
@@ -622,12 +756,152 @@ async def acknowledge_signal(
     return {"success": True, "signal": _signal_to_dict(row)}
 
 
+@app.post("/api/signals/{signal_id}/approve")
+async def approve_manual_signal(
+    signal_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Approve a manually-queued signal to execute the trade automatically.
+
+    This is called from the dashboard when the user clicks 'Approve' on a
+    pending manual signal. The signal is then executed via MetaApi just like
+    an auto-mode trade.
+    """
+    row = db.query(PendingSignal).filter(
+        PendingSignal.id == signal_id,
+        PendingSignal.user_id == user.id,
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Signal not found.")
+
+    if row.status != "PENDING":
+        raise HTTPException(status_code=409, detail=f"Signal already {row.status.lower()}.")
+
+    if row.expires_at <= utcnow():
+        row.status = "EXPIRED"
+        db.commit()
+        raise HTTPException(status_code=410, detail="Signal expired before approval.")
+
+    # Execute the trade via MetaApi (same logic as AUTO mode)
+    from mt5_executor import get_executor
+    executor = await get_executor(row.meta_api_token, row.account_id) if hasattr(row, 'meta_api_token') else None
+
+    # We need the MetaApi credentials - get them from the user's MT5 account
+    mt5_acc = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
+    if not mt5_acc:
+        raise HTTPException(status_code=404, detail="MT5 account not found for user.")
+
+    executor = await get_executor(mt5_acc.plain_meta_api_token, mt5_acc.account_id)
+
+    lots = float(row.lots)
+    action = row.action.upper()
+    sl = row.stop_loss
+    tp = row.take_profit
+
+    trade_result = await executor.execute_trade(
+        symbol="XAUUSD",
+        action=action,
+        lots=lots,
+        stop_loss=sl,
+        take_profit=tp,
+        comment="Manual_Approval"
+    )
+
+    if trade_result.get("success"):
+        log_entry = TradeLog(
+            user_id=user.id,
+            position_id=trade_result.get("position_id"),
+            symbol="XAUUSD",
+            order_type=action,
+            lots=lots,
+            entry_price=trade_result.get("entry_price") or row.entry_price,
+            stop_loss=sl,
+            take_profit=tp,
+            status="OPEN",
+            gemini_reasoning=row.reasoning,
+        )
+        db.add(log_entry)
+        tracker = get_or_create_daily_tracker(db, user.id)
+        tracker.daily_setup_count += 1
+        row.status = "EXECUTED"
+        row.acknowledged_at = utcnow()
+        db.commit()
+
+        await notify_trade_executed(user_id, {
+            "symbol": "XAUUSD",
+            "action": action,
+            "lots": lots,
+            "entry_price": trade_result.get("entry_price"),
+            "position_id": trade_result.get("position_id"),
+            "status": "OPEN",
+        })
+
+        return {
+            "success": True,
+            "message": "Trade approved and executed successfully.",
+            "signal_id": row.id,
+            "position_id": trade_result.get("position_id"),
+        })
+    else:
+        row.status = "FAILED"
+        row.execution_error = trade_result.get("error", "Unknown error")
+        db.commit()
+
+        await notify_error(user_id, f"فشل تنفيذ الصفقة المعتمدة: {trade_result.get('error', 'unknown error')}")
+
+        return {
+            "success": False,
+            "message": f"Trade approval failed: {trade_result.get('error', 'unknown error')}",
+            "signal_id": row.id,
+        }
+
+
 @app.post("/api/toggle-bot")
 async def toggle_bot(
     req: ToggleBotRequest,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
+    """Toggle the trading mode between AUTO and MANUAL.
+
+    - enabled=true  -> switch to AUTO mode (engine executes trades directly)
+    - enabled=false -> switch to MANUAL mode (engine produces signals for user approval)
+    """
+    # Update the TRADING_MODE env var effect by storing user preference
+    # We'll use a per-user setting stored in the database
+    user_pref = db.query(User).filter(User.id == user.id).first()
+    
+    if req.enabled:
+        # Switch to AUTO mode
+        TRADING_MODE = "AUTO"
+        user_pref.trading_mode = "AUTO" if hasattr(user_pref, 'trading_mode') else "AUTO"
+        db.commit()
+        update_bot_status(
+            "Mode: AUTO",
+            f"Trading mode switched to AUTO. Engine will execute trades automatically."
+        )
+        return {
+            "success": True,
+            "message": "Trading mode switched to AUTO.",
+            "mode": "AUTO",
+            "bot_enabled": True,
+        }
+    else:
+        # Switch to MANUAL mode
+        TRADING_MODE = "MANUAL"
+        user_pref.trading_mode = "MANUAL" if hasattr(user_pref, 'trading_mode') else "MANUAL"
+        db.commit()
+        update_bot_status(
+            "Mode: MANUAL",
+            f"Trading mode switched to MANUAL. Engine will produce signals for your approval."
+        )
+        return {
+            "success": True,
+            "message": "Trading mode switched to MANUAL.",
+            "mode": "MANUAL",
+            "bot_enabled": False,
+        }
     """Enables or disables automated trading for the authenticated user."""
     mt5_acc = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
     if not mt5_acc:
@@ -663,6 +937,202 @@ async def get_trade_history(
         }
         for t in trades
     ]
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Endpoint for Real-time Notifications
+# ---------------------------------------------------------------------------
+@app.websocket("/ws/notifications")
+async def websocket_notifications(websocket: WebSocket, token: str = None):
+    """WebSocket endpoint for real-time notifications.
+    
+    Connect with: ws://host/ws/notifications?token=YOUR_ACCESS_TOKEN
+    """
+    # Extract token from query params if not provided
+    if not token:
+        query_params = dict(websocket.query_params)
+        token = query_params.get("token")
+    
+    if not token:
+        await websocket.close(code=4001, reason="Authentication token required")
+        return
+    
+    # Validate token and get user
+    db = SessionLocal()
+    try:
+        session = db.query(UserSession).filter(
+            UserSession.token_hash == hash_token(token)
+        ).first()
+        
+        if not session or session.is_expired:
+            await websocket.close(code=4001, reason="Invalid or expired token")
+            return
+        
+        user = db.query(User).filter(User.id == session.user_id).first()
+        if not user or not user.is_active:
+            await websocket.close(code=4001, reason="User not found or inactive")
+            return
+        
+        user_id = user.id
+        await manager.connect(websocket, user_id)
+        
+        # Send welcome message
+        await websocket.send_json({
+            "type": "connected",
+            "message": "متصل بنظام الإشعارات الفورية",
+            "user_id": user_id,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Keep connection alive and handle incoming messages
+        while True:
+            try:
+                data = await websocket.receive_json()
+                # Handle ping/pong for keepalive
+                if data.get("type") == "ping":
+                    await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
+                elif data.get("type") == "chat":
+                    # Handle chat messages from user
+                    await handle_chat_message(user_id, data.get("message", ""), websocket)
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                logger.error(f"WebSocket error for user {user_id}: {e}")
+                break
+                
+    finally:
+        manager.disconnect(websocket, user_id)
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Chat with Gemini AI Endpoint
+# ---------------------------------------------------------------------------
+class ChatMessageRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+    context: Optional[str] = Field(default=None, description="Additional context like 'trading', 'analysis', 'market'")
+
+
+class ChatMessageResponse(BaseModel):
+    response: str
+    timestamp: str
+
+
+@app.post("/api/chat", response_model=ChatMessageResponse)
+async def chat_with_gemini(
+    req: ChatMessageRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Chat with Gemini AI about trading, market analysis, or general questions."""
+    try:
+        analyzer = GeminiSMCAnalyzer()
+        
+        # Build context-aware system prompt
+        system_prompt = """أنت مساعد تداول ذكي متخصص في تحليل الأسواق المالية باستخدام منهجية Smart Money Concepts (SMC) و Inner Circle Trader (ICT).
+        
+خبرتك تشمل:
+- تحليل هيكل السوق (Market Structure) وتغيير الشخصية (CHoCH)
+- كشف فجوات القيمة العادلة (FVG) وكتل الطلبات (Order Blocks)
+- تحليل السيولة (Liquidity Sweeps) ومناطق العرض والطلب
+- إدارة المخاطر ونسب المخاطرة للعائد (Risk:Reward)
+- تحليل الذهب (XAUUSD) والعملات الرئيسية والعملات الرقمية
+
+أسلوبك: مهني، مباشر، مدعوم بالتحليل الفني، وتقدم نصائح عملية قابلة للتنفيذ.
+اللغة: العربية مع المصطلحات الإنجليزية الشائعة في التداول."""
+        
+        # Add user context if available
+        mt5_acc = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
+        tracker = get_or_create_daily_tracker(db, user.id)
+        
+        context_info = f"""
+معلومات المستخدم الحالية:
+- الرصيد اليومي PnL: ${tracker.total_pnl:.2f}
+- عدد الصفقات اليوم: {tracker.daily_setup_count}/{MAX_DAILY_SETUPS}
+- الهدف اليومي: ${DAILY_PROFIT_TARGET}
+- MT5 متصل: {'نعم' if mt5_acc and mt5_acc.is_connected else 'لا'}
+"""
+        
+        full_prompt = f"{system_prompt}\n\n{context_info}\n\nسؤال المستخدم: {req.message}"
+        
+        # Use the existing analyzer client
+        if not analyzer._is_valid_key(analyzer.api_key):
+            return ChatMessageResponse(
+                response="⚠️ مفتاح Gemini API غير مُعد. يرجى إضافة GEMINI_API_KEY في متغيرات البيئة.",
+                timestamp=datetime.now().isoformat()
+            )
+        
+        # Generate response using Gemini
+        response = await asyncio.to_thread(
+            lambda: analyzer.client.models.generate_content(
+                model=analyzer.model_name,
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.3,
+                    max_output_tokens=1000,
+                ),
+            )
+        )
+        
+        ai_response = response.text.strip()
+        
+        return ChatMessageResponse(
+            response=ai_response,
+            timestamp=datetime.now().isoformat()
+        )
+        
+    except Exception as e:
+        logger.error(f"Chat error: {e}")
+        return ChatMessageResponse(
+            response=f"❌ حدث خطأ في الاتصال بالذكاء الاصطناعي: {str(e)}",
+            timestamp=datetime.now().isoformat()
+        )
+
+
+async def handle_chat_message(user_id: int, message: str, websocket: WebSocket):
+    """Handle incoming chat message via WebSocket."""
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return
+        
+        # Process with Gemini
+        analyzer = GeminiSMCAnalyzer()
+        
+        system_prompt = """أنت مساعد تداول ذكي متخصص في SMC/ICT. أجب بالعربية بأسلوب مهني ومباشر."""
+        
+        if not analyzer._is_valid_key(analyzer.api_key):
+            await websocket.send_json({
+                "type": "chat_response",
+                "response": "⚠️ مفتاح Gemini API غير مُعد.",
+                "timestamp": datetime.now().isoformat()
+            })
+            return
+        
+        response = await asyncio.to_thread(
+            lambda: analyzer.client.models.generate_content(
+                model=analyzer.model_name,
+                contents=f"{system_prompt}\n\nالمستخدم: {message}",
+                config=types.GenerateContentConfig(temperature=0.3, max_output_tokens=800),
+            )
+        )
+        
+        await websocket.send_json({
+            "type": "chat_response",
+            "response": response.text.strip(),
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"WebSocket chat error: {e}")
+        await websocket.send_json({
+            "type": "chat_response",
+            "response": f"❌ خطأ: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        })
+    finally:
+        db.close()
 
 
 import requests
@@ -944,6 +1414,7 @@ async def run_trading_engine_loop():
     Continuous async background loop running 24/7.
     Evaluates market setups using Gemini AI, executes trades via MetaApi,
     and enforces strict $100 daily profit caps & 5 setup/day limits.
+    Sends real-time notifications via WebSocket to connected clients.
     """
     logger.info("Starting Background Gemini AI + MT5 Trading Engine Loop...")
     analyzer = GeminiSMCAnalyzer()
@@ -983,6 +1454,7 @@ async def run_trading_engine_loop():
                             "Credential Error",
                             f"User {user_id}: stored MetaApi token could not be decrypted. Re-enter credentials."
                         )
+                        await notify_error(user_id, "الرمز المميز لـ MetaApi غير صالح. يرجى إعادة إدخال بيانات الاعتماد.")
                         continue
 
                     executor = await get_executor(api_token, mt5_acc.account_id)
@@ -1015,6 +1487,15 @@ async def run_trading_engine_loop():
                     tracker.total_pnl = realized_pnl + unrealized_pnl
                     db.commit()
 
+                    # Notify PnL update to connected clients
+                    await notify_profit_update(user_id, {
+                        "total_pnl": tracker.total_pnl,
+                        "realized_pnl": tracker.realized_pnl,
+                        "unrealized_pnl": tracker.unrealized_pnl,
+                        "daily_setup_count": tracker.daily_setup_count,
+                        "max_daily_setups": MAX_DAILY_SETUPS
+                    })
+
                     # Check 1: Enforce the daily profit cap.
                     if tracker.total_pnl >= DAILY_PROFIT_TARGET or tracker.target_cap_reached:
                         if not tracker.target_cap_reached:
@@ -1027,6 +1508,7 @@ async def run_trading_engine_loop():
                             db.commit()
                             closed = await executor.close_all_positions_due_to_profit_cap()
                             logger.info(f"Closed {closed} open position(s) for user {user_id} after hitting the cap.")
+                            await notify_daily_limit_reached(user_id, "profit")
 
                         update_bot_status(
                             "Profit Cap Reached",
@@ -1040,6 +1522,7 @@ async def run_trading_engine_loop():
                             "Daily Setup Cap Hit",
                             f"User {user_id} reached {tracker.daily_setup_count}/{MAX_DAILY_SETUPS} daily setups."
                         )
+                        await notify_daily_limit_reached(user_id, "setups")
                         continue
 
                     # Check 3: Economic news blackout window.
@@ -1047,6 +1530,7 @@ async def run_trading_engine_loop():
                     news_status = await news_guard.is_news_impact_zone()
                     if not news_status["is_safe"]:
                         update_bot_status("News Blackout Active", f"Trading paused: {news_status['reason']}")
+                        await notify_news_blackout(user_id, news_status.get("event", "Unknown Event"))
                         continue
 
                     # Fetch XAUUSD candles for M1, M5, M15.
@@ -1090,6 +1574,19 @@ async def run_trading_engine_loop():
                         )
                         db.add(analysis_entry)
                         db.commit()
+                        
+                        # Notify new signal to connected clients
+                        await notify_signal_generated(user_id, {
+                            "symbol": "XAUUSD",
+                            "action": action,
+                            "confidence": confidence,
+                            "entry_price": signal.get("entry_price"),
+                            "stop_loss": signal.get("stop_loss"),
+                            "take_profit": signal.get("take_profit"),
+                            "risk_reward_ratio": signal.get("risk_reward_ratio"),
+                            "setup_type": signal.get("setup_type"),
+                            "reasoning": signal.get("reasoning", ""),
+                        })
 
                     # Execute only on a high-confidence directional signal.
                     if action in ["BUY", "SELL"] and confidence >= MIN_SIGNAL_CONFIDENCE:
@@ -1103,6 +1600,56 @@ async def run_trading_engine_loop():
                         sl = signal.get("stop_loss")
                         tp = signal.get("take_profit")
 
+                        # --- MANUAL MODE: Wait for user approval/rejection ---
+                        if TRADING_MODE == "MANUAL":
+                            # Create a pending signal and notify the user for approval
+                            entry_for_signal = signal.get("entry_price") or current_price
+                            pending = PendingSignal(
+                                user_id=user_id,
+                                symbol="XAUUSD",
+                                action=action,
+                                lots=lots,
+                                entry_price=float(entry_for_signal),
+                                stop_loss=sl,
+                                take_profit=tp,
+                                confidence=confidence,
+                                reasoning=signal.get("reasoning", ""),
+                                setup_type=signal.get("setup_type", "SMC/ICT Institutional Setup"),
+                                risk_reward_ratio=signal.get("risk_reward_ratio"),
+                                status="PENDING",
+                                expires_at=utcnow() + timedelta(seconds=PENDING_SIGNAL_TTL_SECONDS),
+                            )
+                            db.add(pending)
+                            db.commit()
+                            db.refresh(pending)
+
+                            await notify_signal_generated(user_id, {
+                                "symbol": "XAUUSD",
+                                "action": action,
+                                "lots": lots,
+                                "entry_price": float(entry_for_signal),
+                                "stop_loss": sl,
+                                "take_profit": tp,
+                                "confidence": confidence,
+                                "setup_type": signal.get("setup_type", "SMC/ICT Institutional Setup"),
+                                "reasoning": signal.get("reasoning", ""),
+                                "signal_id": pending.id,
+                                "mode": "MANUAL",
+                                "requires_approval": True,
+                            })
+
+                            update_bot_status(
+                                "Signal Pending Approval",
+                                f"User {user_id}: {action} signal #{pending.id} awaiting your approval. "
+                                f"Daily setups: {tracker.daily_setup_count}/{MAX_DAILY_SETUPS}"
+                            )
+                            logger.info(
+                                f"Manual mode: queued pending_signal id={pending.id} "
+                                f"({action} XAUUSD {lots} lots) for user {user_id} awaiting approval."
+                            )
+                            continue  # Skip execution, wait for user response
+
+                        # --- BRIDGE MODE: Queue for local bot ---
                         if BRIDGE_MODE:
                             # Enqueue for the local Windows bot instead of
                             # executing on Render. The bot will POST /api/signals/<id>/ack
@@ -1136,8 +1683,19 @@ async def run_trading_engine_loop():
                                 f"Bridge: queued pending_signal id={pending.id} "
                                 f"({action} XAUUSD {lots} lots) for user {user_id}."
                             )
+                            await notify_signal_generated(user_id, {
+                                "symbol": "XAUUSD",
+                                "action": action,
+                                "lots": lots,
+                                "entry_price": float(entry_for_signal),
+                                "stop_loss": sl,
+                                "take_profit": tp,
+                                "confidence": confidence,
+                                "status": "QUEUED_FOR_BRIDGE",
+                            })
                             continue
 
+                        # --- AUTO MODE: Execute directly via MetaApi ---
                         trade_result = await executor.execute_trade(
                             symbol="XAUUSD",
                             action=action,
@@ -1172,12 +1730,23 @@ async def run_trading_engine_loop():
                                 f"Trade executed and logged for user {user_id}. "
                                 f"Daily setups: {tracker.daily_setup_count}/{MAX_DAILY_SETUPS}"
                             )
+                            
+                            # Notify trade execution to connected clients
+                            await notify_trade_executed(user_id, {
+                                "symbol": "XAUUSD",
+                                "action": action,
+                                "lots": lots,
+                                "entry_price": trade_result.get("entry_price"),
+                                "position_id": trade_result.get("position_id"),
+                                "status": "OPEN",
+                            })
                         else:
                             update_bot_status(
                                 "Trade Rejected",
                                 f"Order not placed: {trade_result.get('error', 'unknown error')}"
                             )
                             logger.error(f"Trade execution failed for user {user_id}: {trade_result.get('error')}")
+                            await notify_error(user_id, f"فشل تنفيذ الصفقة: {trade_result.get('error', 'unknown error')}")
                     else:
                         reasoning_msg = signal.get("reasoning", "No trade setup.")
                         update_bot_status(
@@ -1194,6 +1763,8 @@ async def run_trading_engine_loop():
         except Exception as e:
             update_bot_status("Error", f"Engine loop exception: {str(e)}")
             logger.error(f"Error in background trading engine loop: {e}", exc_info=True)
+            # Notify error to all connected users
+            await notify_error(0, f"خطأ في المحرك: {str(e)}")
 
         update_bot_status(
             "Waiting Cycle",

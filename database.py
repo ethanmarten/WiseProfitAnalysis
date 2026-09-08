@@ -66,6 +66,9 @@ class User(Base):
     created_at = Column(DateTime, default=utcnow)
     is_active = Column(Boolean, default=True)
 
+    # Trading mode preference: AUTO or MANUAL
+    trading_mode = Column(String(10), default="AUTO")  # AUTO: engine executes, MANUAL: user approval
+
     mt5_account = relationship("MT5Account", back_populates="user", uselist=False, cascade="all, delete-orphan")
     daily_trackers = relationship("DailyProfitTracker", back_populates="user", cascade="all, delete-orphan")
     trade_logs = relationship("TradeLog", back_populates="user", cascade="all, delete-orphan")
@@ -248,6 +251,12 @@ def _run_lightweight_migrations() -> None:
         logger.info("Migrating: adding users.password_hash column.")
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(255)"))
+
+    # Add trading_mode column if it doesn't exist
+    if "trading_mode" not in existing:
+        logger.info("Migrating: adding users.trading_mode column.")
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE users ADD COLUMN trading_mode VARCHAR(10) DEFAULT 'AUTO'"))
 
     # pending_signals table is created by Base.metadata.create_all on first run;
     # on existing databases the lightweight migrations below backfill required

@@ -100,6 +100,30 @@
       gap: 20px;
     }
 
+    /* Trading Mode Badge */
+    .mode-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .mode-badge.auto {
+      background: rgba(0, 230, 153, 0.15);
+      color: var(--primary-accent);
+      border: 1px solid var(--primary-accent);
+    }
+
+    .mode-badge.manual {
+      background: rgba(255, 183, 3, 0.15);
+      color: #ffb703;
+      border: 1px solid #ffb703;
+    }
+
     .status-badge {
       display: inline-flex;
       align-items: center;
@@ -112,6 +136,25 @@
       font-size: 0.82rem;
       font-weight: 700;
       letter-spacing: 0.5px;
+    }
+
+    .mode-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 20px;
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .mode-indicator.auto {
+      color: var(--primary-accent);
+    }
+
+    .mode-indicator.manual {
+      color: #ffb703;
     }
 
     .status-dot {
@@ -1017,6 +1060,7 @@
           <i class="fa-solid fa-microchip fa-spin"></i> Live AI Engine Activity (24/7 Gold Scalper)
         </span>
         <span id="liveStatusTime">Syncing...</span>
+        <span style="margin-left: 24px; font-size: 0.85rem; color: var(--text-muted);" id="modeStatusBadge">AUTO</span>
       </div>
       <div style="font-size: 1.1rem; font-weight: 700; color: #ffffff;" id="liveStatusStep">
         Initializing Engine...
@@ -1626,6 +1670,16 @@
     function openMT5Modal() { document.getElementById('mt5Modal').style.display = 'flex'; }
     function closeMT5Modal() { document.getElementById('mt5Modal').style.display = 'none'; }
 
+    // Update trading mode badge appearance
+    function updateModeBadge() {
+      const mode = localStorage.getItem('trading_mode') || 'AUTO';
+      const badge = document.getElementById('modeStatusBadge');
+      if (badge) {
+        badge.textContent = mode;
+        badge.className = 'mode-indicator ' + mode.toLowerCase();
+      }
+    }
+
     async function signOutUser() {
       try {
         await authFetch('/api/logout', { method: 'POST' });
@@ -1699,6 +1753,9 @@
         return; // authFetch already redirected.
       }
 
+      // Update trading mode badge
+      updateModeBadge();
+
       updateLiveMarketTicker('XAUUSD');
       fetchDashboardData().then(() => {
         if (!hasLoadedInitialAnalysis) {
@@ -1707,6 +1764,112 @@
       });
       setInterval(fetchDashboardData, 5000);
     });
+
+    // --- Manual Trading Mode Handlers ---
+
+    // Handle signal approval/rejection from pending signals list
+    document.addEventListener('click', (e) => {
+      const approveBtn = e.target.closest('.approve-signal-btn');
+      const rejectBtn = e.target.closest('.reject-signal-btn');
+
+      if (approveBtn) {
+        const signalId = approveBtn.dataset.signalId;
+        approveManualSignal(signalId);
+      }
+
+      if (rejectBtn) {
+        const signalId = rejectBtn.dataset.signalId;
+        rejectManualSignal(signalId);
+      }
+    });
+
+    // Approve a manual signal for execution
+    async function approveManualSignal(signalId) {
+      try {
+        const res = await fetch(`/api/signals/${signalId}/approve`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${getAuthToken()}`
+          }
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          showToast(data.detail || 'Failed to approve signal', 'error');
+          return;
+        }
+
+        // Reload dashboard to show updated state
+        fetchDashboardData();
+        showToast('Signal approved and trade executed!', 'success');
+      } catch (err) {
+        showToast('Error communicating with server', 'error');
+        console.error(err);
+      }
+    }
+
+    // Reject a manual signal
+    async function rejectManualSignal(signalId) {
+      try {
+        const res = await fetch(`/api/signals/${signalId}/ack`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${getAuthToken()}`
+          },
+          body: JSON.stringify({ status: 'failed' })
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          showToast('Failed to reject signal', 'error');
+          return;
+        }
+
+        // Reload dashboard to show updated state
+        fetchDashboardData();
+        showToast('Signal rejected.', 'warning');
+      } catch (err) {
+        showToast('Error communicating with server', 'error');
+        console.error(err);
+      }
+    }
+
+    // Show toast notification
+    function showToast(message, type = 'info') {
+      // Create toast element if not exists
+      let toast = document.getElementById('globalToast');
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'globalToast';
+        toast.style.position = 'fixed';
+        toast.style.bottom = '24px';
+        toast.style.left = '50%';
+        toast.style.transform = 'translateX(-50%)';
+        toast.style.background = 'rgba(0, 0, 0, 0.8)';
+        toast.style.color = '#fff';
+        toast.style.padding = '12px 24px';
+        toast.style.borderRadius = '8px';
+        toast.style.zIndex = '10000';
+        toast.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)';
+        toast.style.minWidth = '250px';
+        document.body.appendChild(toast);
+      }
+
+      toast.textContent = message;
+      toast.style.background = type === 'success' ? 'rgba(0, 230, 153, 0.2)' : type === 'error' ? 'rgba(255, 77, 77, 0.2)' : 'rgba(255, 183, 3, 0.2)';
+      toast.style.borderLeft = type === 'success' ? '3px solid var(--primary-accent)' : type === 'error' ? '3px solid var(--danger)' : '3px solid #ffb703';
+
+      toast.style.opacity = '0';
+      toast.style.transition = 'opacity 0.3s ease';
+      setTimeout(() => toast.style.opacity = '1', 50);
+
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        setTimeout(() => toast.remove(), 500);
+      }, 3000);
+    }
   </script>
 </body>
 
