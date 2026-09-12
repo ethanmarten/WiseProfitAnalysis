@@ -1,0 +1,235 @@
+{
+  "entries": [
+    {
+      "relPath": "auth.py",
+      "language": "py",
+      "symbols": [
+        "create_session",
+        "revoke_session",
+        "_extract_token",
+        "current_user",
+        "authorize_user_id"
+      ],
+      "imports": [
+        "__future__",
+        "logging",
+        "os",
+        "datetime",
+        "typing",
+        "fastapi",
+        "sqlalchemy.orm",
+        "database",
+        "security"
+      ]
+    },
+    {
+      "relPath": "bridge/local_mt5_bot.py",
+      "language": "py",
+      "symbols": [
+        "BridgeError",
+        "_login",
+        "_get",
+        "_post",
+        "initialize_mt5",
+        "_symbol_info",
+        "execute_signal",
+        "run_loop",
+        "main"
+      ],
+      "imports": [
+        "os",
+        "sys",
+        "time",
+        "logging",
+        "typing",
+        "requests",
+        "dotenv"
+      ]
+    },
+    {
+      "relPath": "database.py",
+      "language": "py",
+      "symbols": [
+        "utcnow",
+        "User",
+        "UserSession",
+        "MT5Account",
+        "DailyProfitTracker",
+        "TradeLog",
+        "PendingSignal",
+        "AnalysisLog",
+        "_run_lightweight_migrations",
+        "init_db",
+        "purge_expired_sessions",
+        "get_db",
+        "get_or_create_daily_tracker"
+      ],
+      "imports": [
+        "datetime",
+        "logging",
+        "os",
+        "typing",
+        "sqlalchemy",
+        "sqlalchemy.orm",
+        "security"
+      ]
+    },
+    {
+      "relPath": "gemini_analyzer.py",
+      "language": "py",
+      "symbols": [
+        "SMCTradeSignal",
+        "GeminiSMCAnalyzer"
+      ],
+      "imports": [
+        "asyncio",
+        "os",
+        "json",
+        "logging",
+        "typing",
+        "google",
+        "google.genai",
+        "pydantic"
+      ]
+    },
+    {
+      "relPath": "main.py",
+      "language": "py",
+      "symbols": [
+        "ConnectionManager",
+        "notify_user",
+        "notify_trade_executed",
+        "notify_signal_generated",
+        "notify_profit_update",
+        "notify_daily_limit_reached",
+        "notify_news_blackout",
+        "notify_error",
+        "update_bot_status",
+        "lifespan",
+        "healthz",
+        "api_health",
+        "LoginRequest",
+        "RegisterUserRequest",
+        "RegisterAccountRequest",
+        "ToggleBotRequest",
+        "SignalAckRequest",
+        "serve_landing_page",
+        "serve_dashboard",
+        "favicon",
+        "signup_user",
+        "login_user",
+        "logout_user",
+        "get_me",
+        "register_account",
+        "get_dashboard_data",
+        "_signal_to_dict",
+        "list_pending_signals",
+        "claim_signal",
+        "acknowledge_signal",
+        "approve_manual_signal",
+        "toggle_bot",
+        "toggle_bot_endpoint",
+        "get_trade_history",
+        "websocket_notifications",
+        "ChatMessageRequest",
+        "ChatMessageResponse",
+        "chat_with_gemini",
+        "handle_chat_message",
+        "fetch_live_market_data",
+        "fetch_latest_candle_close",
+        "fetch_live_candles",
+        "get_market_data",
+        "get_candle_close",
+        "AnalyzeSymbolRequest",
+        "analyze_symbol_on_demand",
+        "run_trading_engine_loop"
+      ],
+      "imports": [
+        "os",
+        "sys",
+        "asyncio",
+        "logging",
+        "datetime",
+        "typing",
+        "fastapi",
+        "fastapi.responses",
+        "fastapi.middleware.cors",
+        "fastapi.staticfiles",
+        "pydantic",
+        "sqlalchemy.orm",
+        "json",
+        "database",
+        "gemini_analyzer",
+        "mt5_executor",
+        "news_filter",
+        "security",
+        "auth",
+        "google.genai",
+        "contextlib",
+        "secrets",
+        "requests"
+      ]
+    },
+    {
+      "relPath": "mt5_executor.py",
+      "language": "py",
+      "symbols": [
+        "_utcnow",
+        "get_executor",
+        "MetaApiMT5Executor"
+      ],
+      "imports": [
+        "asyncio",
+        "logging",
+        "os",
+        "typing",
+        "datetime"
+      ]
+    },
+    {
+      "relPath": "news_filter.py",
+      "language": "py",
+      "symbols": [
+        "_utcnow",
+        "EconomicNewsFilter"
+      ],
+      "imports": [
+        "asyncio",
+        "logging",
+        "os",
+        "datetime",
+        "typing",
+        "requests"
+      ]
+    },
+    {
+      "relPath": "security.py",
+      "language": "py",
+      "symbols": [
+        "_resolve_secret_key",
+        "hash_password",
+        "verify_password",
+        "generate_session_token",
+        "hash_token",
+        "_fernet",
+        "encrypt_secret",
+        "decrypt_secret"
+      ],
+      "imports": [
+        "__future__",
+        "base64",
+        "hashlib",
+        "hmac",
+        "logging",
+        "os",
+        "secrets",
+        "typing"
+      ]
+    }
+  ],
+  "totalFiles": 8,
+  "indexedFiles": 8,
+  "method": "regex",
+  "generatedAt": 1789027769980,
+  "merkleRoot": "308eb3eb18614be84a0d2df9c0985a6ce9f94c3c99bdfc912bc82a71f3d25598"
+}

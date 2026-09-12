@@ -828,7 +828,7 @@ async def approve_manual_signal(
         row.acknowledged_at = utcnow()
         db.commit()
 
-        await notify_trade_executed(user_id, {
+        await notify_trade_executed(user.id, {
             "symbol": "XAUUSD",
             "action": action,
             "lots": lots,
@@ -842,13 +842,13 @@ async def approve_manual_signal(
             "message": "Trade approved and executed successfully.",
             "signal_id": row.id,
             "position_id": trade_result.get("position_id"),
-        })
+        }
     else:
         row.status = "FAILED"
         row.execution_error = trade_result.get("error", "Unknown error")
         db.commit()
 
-        await notify_error(user_id, f"فشل تنفيذ الصفقة المعتمدة: {trade_result.get('error', 'unknown error')}")
+        await notify_error(user.id, f"فشل تنفيذ الصفقة المعتمدة: {trade_result.get('error', 'unknown error')}")
 
         return {
             "success": False,
@@ -902,6 +902,154 @@ async def toggle_bot(
             "mode": "MANUAL",
             "bot_enabled": False,
         }
+
+
+@app.post("/api/signals/{signal_id}/approve")
+async def approve_manual_signal(
+    signal_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Approve a manually-queued signal to execute the trade automatically.
+
+    This is called from the dashboard when the user clicks 'Approve' on a
+    pending manual signal. The signal is then executed via MetaApi just like
+    an auto-mode trade.
+    """
+    row = db.query(PendingSignal).filter(
+        PendingSignal.id == signal_id,
+        PendingSignal.user_id == user.id,
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Signal not found.")
+
+    if row.status != "PENDING":
+        raise HTTPException(status_code=409, detail=f"Signal already {row.status.lower()}.")
+
+    if row.expires_at <= utcnow():
+        row.status = "EXPIRED"
+        db.commit()
+        raise HTTPException(status_code=410, detail="Signal expired before approval.")
+
+    # Execute the trade via MetaApi (same logic as AUTO mode)
+    mt5_acc = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
+    if not mt5_acc:
+        raise HTTPException(status_code=404, detail="MT5 account not found for user.")
+
+    executor = await get_executor(mt5_acc.plain_meta_api_token, mt5_acc.account_id)
+
+    lots = float(row.lots)
+    action = row.action.upper()
+    sl = row.stop_loss
+    tp = row.take_profit
+
+    trade_result = await executor.execute_trade(
+        symbol="XAUUSD",
+        action=action,
+        lots=lots,
+        stop_loss=sl,
+        take_profit=tp,
+        comment="Manual_Approval"
+    )
+
+    if trade_result.get("success"):
+        log_entry = TradeLog(
+            user_id=user.id,
+            position_id=trade_result.get("position_id"),
+            symbol="XAUUSD",
+            order_type=action,
+            lots=lots,
+            entry_price=trade_result.get("entry_price") or row.entry_price,
+            stop_loss=sl,
+            take_profit=tp,
+            status="OPEN",
+            gemini_reasoning=row.reasoning,
+        )
+        db.add(log_entry)
+        tracker = get_or_create_daily_tracker(db, user.id)
+        tracker.daily_setup_count += 1
+        row.status = "EXECUTED"
+        row.acknowledged_at = utcnow()
+        db.commit()
+
+        await notify_trade_executed(user.id, {
+            "symbol": "XAUUSD",
+            "action": action,
+            "lots": lots,
+            "entry_price": trade_result.get("entry_price"),
+            "position_id": trade_result.get("position_id"),
+            "status": "OPEN",
+        })
+
+        return {
+            "success": True,
+            "message": "Trade approved and executed successfully.",
+            "signal_id": row.id,
+            "position_id": trade_result.get("position_id"),
+        }
+    else:
+        row.status = "FAILED"
+        row.execution_error = trade_result.get("error", "Unknown error")
+        db.commit()
+
+        await notify_error(user.id, f"فشل تنفيذ الصفقة المعتمدة: {trade_result.get('error', 'unknown error')}")
+
+        return {
+            "success": False,
+            "message": f"Trade approval failed: {trade_result.get('error', 'unknown error')}",
+            "signal_id": row.id,
+        }
+
+
+@app.post("/api/toggle-bot")
+async def toggle_bot(
+    req: ToggleBotRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Toggle the trading mode between AUTO and MANUAL.
+
+    - enabled=true  -> switch to AUTO mode (engine executes trades directly)
+    - enabled=false -> switch to MANUAL mode (engine produces signals for user approval)
+    """
+    user_pref = db.query(User).filter(User.id == user.id).first()
+
+    if req.enabled:
+        # Switch to AUTO mode
+        user_pref.trading_mode = "AUTO"
+        db.commit()
+        update_bot_status(
+            "Mode: AUTO",
+            f"Trading mode switched to AUTO. Engine will execute trades automatically."
+        )
+        return {
+            "success": True,
+            "message": "Trading mode switched to AUTO.",
+            "mode": "AUTO",
+            "bot_enabled": True,
+        }
+    else:
+        # Switch to MANUAL mode
+        user_pref.trading_mode = "MANUAL"
+        db.commit()
+        update_bot_status(
+            "Mode: MANUAL",
+            f"Trading mode switched to MANUAL. Engine will produce signals for your approval."
+        )
+        return {
+            "success": True,
+            "message": "Trading mode switched to MANUAL.",
+            "mode": "MANUAL",
+            "bot_enabled": False,
+        }
+
+
+@app.post("/api/toggle-bot")
+async def toggle_bot_endpoint(
+    req: ToggleBotRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
     """Enables or disables automated trading for the authenticated user."""
     mt5_acc = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
     if not mt5_acc:
@@ -913,6 +1061,226 @@ async def toggle_bot(
 
 
 @app.get("/api/trades/{user_id}")
+async def get_trade_history(
+    user_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Retrieves the authenticated user's full trade audit log."""
+    authorize_user_id(user, user_id)
+    trades = db.query(TradeLog).filter(TradeLog.user_id == user.id).order_by(TradeLog.executed_at.desc()).all()
+    return [
+        {
+            "id": t.id,
+            "symbol": t.symbol,
+            "type": t.order_type,
+            "lots": t.lots,
+            "entry_price": t.entry_price,
+            "sl": t.stop_loss,
+            "tp": t.take_profit,
+            "profit": t.profit,
+            "status": t.status,
+            "reasoning": t.gemini_reasoning,
+            "executed_at": t.executed_at.isoformat()
+        }
+        for t in trades
+    ]
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Endpoint for Real-time Notifications
+# ---------------------------------------------------------------------------
+@app.websocket("/ws/notifications")
+async def websocket_notifications(websocket: WebSocket, token: str = None):
+    """WebSocket endpoint for real-time notifications.
+
+    Connect with: ws://host/ws/notifications?token=YOUR_ACCESS_TOKEN
+    """
+    # Extract token from query params if not provided
+    if not token:
+        query_params = dict(websocket.query_params)
+        token = query_params.get("token")
+
+    if not token:
+        await websocket.close(code=4001, reason="Authentication token required")
+        return
+
+    # Validate token and get user
+    db = SessionLocal()
+    try:
+        session = db.query(UserSession).filter(
+            UserSession.token_hash == hash_token(token)
+        ).first()
+
+        if not session or session.is_expired:
+            await websocket.close(code=4001, reason="Invalid or expired token")
+            return
+
+        user = db.query(User).filter(User.id == session.user_id).first()
+        if not user or not user.is_active:
+            await websocket.close(code=4001, reason="User not found or inactive")
+            return
+
+        user_id = user.id
+        await manager.connect(websocket, user_id)
+
+        # Send welcome message
+        await websocket.send_json({
+            "type": "connected",
+            "message": "متصل بنظام الإشعارات الفورية",
+            "user_id": user_id,
+            "timestamp": datetime.now().isoformat()
+        })
+
+        # Keep connection alive and handle incoming messages
+        while True:
+            try:
+                data = await websocket.receive_json()
+                # Handle ping/pong for keepalive
+                if data.get("type") == "ping":
+                    await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
+                elif data.get("type") == "chat":
+                    # Handle chat messages from user
+                    await handle_chat_message(user_id, data.get("message", ""), websocket)
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                logger.error(f"WebSocket error for user {user_id}: {e}")
+                break
+
+    finally:
+        manager.disconnect(websocket, user_id)
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Chat with Gemini AI Endpoint
+# ---------------------------------------------------------------------------
+class ChatMessageRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+    context: Optional[str] = Field(default=None, description="Additional context like 'trading', 'analysis', 'market'")
+
+
+class ChatMessageResponse(BaseModel):
+    response: str
+    timestamp: str
+
+
+@app.post("/api/chat", response_model=ChatMessageResponse)
+async def chat_with_gemini(
+    req: ChatMessageRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Chat with Gemini AI about trading, market analysis, or general questions."""
+    try:
+        analyzer = GeminiSMCAnalyzer()
+
+        # Build context-aware system prompt
+        system_prompt = """أنت مساعد تداول ذكي متخصص في تحليل الأسواق المالية باستخدام منهجية Smart Money Concepts (SMC) و Inner Circle Trader (ICT).
+
+خبرتك تشمل:
+- تحليل هيكل السوق (Market Structure) وتغيير الشخصية (CHoCH)
+- كشف فجوات القيمة العادلة (FVG) وكتل الطلبات (Order Blocks)
+- تحليل السيولة (Liquidity Sweeps) ومناطق العرض والطلب
+- إدارة المخاطر ونسب المخاطرة للعائد (Risk:Reward)
+- تحليل الذهب (XAUUSD) والعملات الرئيسية والعملات الرقمية
+
+أسلوبك: مهني، مباشر، مدعوم بالتحليل الفني، وتقدم نصائح عملية قابلة للتنفيذ.
+اللغة: العربية مع المصطلحات الإنجليزية الشائعة في التداول."""
+
+        # Add user context if available
+        mt5_acc = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
+        tracker = get_or_create_daily_tracker(db, user.id)
+
+        context_info = f"""
+معلومات المستخدم الحالية:
+- الرصيد اليومي PnL: ${tracker.total_pnl:.2f}
+- عدد الصفقات اليوم: {tracker.daily_setup_count}/{MAX_DAILY_SETUPS}
+- الهدف اليومي: ${DAILY_PROFIT_TARGET}
+- MT5 متصل: {'نعم' if mt5_acc and mt5_acc.is_connected else 'لا'}
+"""
+
+        full_prompt = f"{system_prompt}\n\n{context_info}\n\nسؤال المستخدم: {req.message}"
+
+        # Use the existing analyzer client
+        if not analyzer._is_valid_key(analyzer.api_key):
+            return ChatMessageResponse(
+                response="⚠️ مفتاح Gemini API غير مُعد. يرجى إضافة GEMINI_API_KEY في متغيرات البيئة.",
+                timestamp=datetime.now().isoformat()
+            )
+
+        # Generate response using Gemini
+        response = await asyncio.to_thread(
+            lambda: analyzer.client.models.generate_content(
+                model=analyzer.model_name,
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.3,
+                    max_output_tokens=1000,
+                ),
+            )
+        )
+
+        ai_response = response.text.strip()
+
+        return ChatMessageResponse(
+            response=ai_response,
+            timestamp=datetime.now().isoformat()
+        )
+
+    except Exception as e:
+        logger.error(f"Chat error: {e}")
+        return ChatMessageResponse(
+            response=f"❌ حدث خطأ في الاتصال بالذكاء الاصطناعي: {str(e)}",
+            timestamp=datetime.now().isoformat()
+        )
+
+
+async def handle_chat_message(user_id: int, message: str, websocket: WebSocket):
+    """Handle incoming chat message via WebSocket."""
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return
+
+        # Process with Gemini
+        analyzer = GeminiSMCAnalyzer()
+
+        system_prompt = """أنت مساعد تداول ذكي متخصص في SMC/ICT. أجب بالعربية بأسلوب مهني ومباشر."""
+
+        if not analyzer._is_valid_key(analyzer.api_key):
+            await websocket.send_json({
+                "type": "chat_response",
+                "response": "⚠️ مفتاح Gemini API غير مُعد.",
+                "timestamp": datetime.now().isoformat()
+            })
+            return
+
+        response = await asyncio.to_thread(
+            lambda: analyzer.client.models.generate_content(
+                model=analyzer.model_name,
+                contents=f"{system_prompt}\n\nالمستخدم: {message}",
+                config=types.GenerateContentConfig(temperature=0.3, max_output_tokens=800),
+            )
+        )
+
+        await websocket.send_json({
+            "type": "chat_response",
+            "response": response.text.strip(),
+            "timestamp": datetime.now().isoformat()
+        })
+
+    except Exception as e:
+        logger.error(f"WebSocket chat error: {e}")
+        await websocket.send_json({
+            "type": "chat_response",
+            "response": f"❌ خطأ: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        })
+    finally:
+        db.close()
 async def get_trade_history(
     user_id: int,
     user: User = Depends(current_user),
