@@ -88,6 +88,11 @@ else:
 # ---------------------------------------------------------------------------
 BACKGROUND_LOOP_ACTIVE = True
 
+# Latest market data uploaded by the local MT5 bridge. Render does not connect
+# to a broker; the desktop terminal is the source of truth for XAUUSD candles.
+LOCAL_MARKET_DATA: Dict[str, Dict[str, Any]] = {}
+LOCAL_MARKET_DATA_MAX_AGE_SECONDS = int(os.getenv("LOCAL_MARKET_DATA_MAX_AGE_SECONDS", "90"))
+
 BOT_LIVE_STATUS = {
     "step": "Initializing",
     "detail": "Background Gemini AI SaaS Trading Engine ready.",
@@ -1506,6 +1511,59 @@ def fetch_live_candles(symbol: str, interval: str = "1m", limit: int = 30) -> Li
     return []
 
 
+def get_recent_local_market_data(symbol: str) -> Optional[Dict[str, Any]]:
+    """Returns fresh candle data uploaded by the local MetaTrader 5 terminal."""
+    item = LOCAL_MARKET_DATA.get(symbol.upper().strip())
+    if not item:
+        return None
+    if (datetime.now().timestamp() - item["received_at"]) > LOCAL_MARKET_DATA_MAX_AGE_SECONDS:
+        return None
+    return item
+
+
+@app.post("/api/market-data")
+async def receive_local_market_data(request: Request):
+    """Receives M1/M5/M15 candles from the local MetaTrader 5 bridge."""
+    try:
+        payload = await request.json()
+        symbol = str(payload.get("symbol", "")).upper().strip()
+        timeframes = payload.get("timeframes") or {}
+        if not symbol or not isinstance(timeframes, dict):
+            raise ValueError("symbol and timeframes are required")
+
+        normalized: Dict[str, List[Dict[str, Any]]] = {}
+        for timeframe in ("M1", "M5", "M15"):
+            candles = timeframes.get(timeframe) or []
+            if not isinstance(candles, list):
+                raise ValueError(f"{timeframe} must be a list")
+            normalized[timeframe] = [
+                {
+                    "time": str(candle.get("time", "")),
+                    "open": float(candle["open"]),
+                    "high": float(candle["high"]),
+                    "low": float(candle["low"]),
+                    "close": float(candle["close"]),
+                    "volume": float(candle.get("tick_volume", candle.get("volume", 0))),
+                }
+                for candle in candles[-50:]
+            ]
+
+        if any(len(normalized[key]) < 3 for key in ("M1", "M5", "M15")):
+            raise ValueError("M1, M5, and M15 each need at least 3 candles")
+
+        LOCAL_MARKET_DATA[symbol] = {
+            "received_at": datetime.now().timestamp(),
+            "timeframes": normalized,
+        }
+        return {
+            "success": True,
+            "symbol": symbol,
+            "received": {key: len(value) for key, value in normalized.items()},
+        }
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid market data: {exc}") from exc
+
+
 @app.get("/api/market-data/{symbol}")
 async def get_market_data(symbol: str):
     """Returns live 24h market stats (real-time price, bid, ask, high, low, change)."""
@@ -1546,9 +1604,16 @@ async def analyze_symbol_on_demand(
     current_price = live_data["price"]
     m1_candles, m5_candles, m15_candles = [], [], []
 
-    m1_candles = fetch_live_candles(symbol, "1m", limit=30)
-    m5_candles = fetch_live_candles(symbol, "5m", limit=30)
-    m15_candles = fetch_live_candles(symbol, "15m", limit=30)
+    local_data = get_recent_local_market_data(symbol)
+    if local_data:
+        m1_candles = local_data["timeframes"]["M1"]
+        m5_candles = local_data["timeframes"]["M5"]
+        m15_candles = local_data["timeframes"]["M15"]
+        current_price = m1_candles[-1]["close"]
+    else:
+        m1_candles = fetch_live_candles(symbol, "1m", limit=30)
+        m5_candles = fetch_live_candles(symbol, "5m", limit=30)
+        m15_candles = fetch_live_candles(symbol, "15m", limit=30)
 
     if not m15_candles:
         # No real market data available anywhere. Previously this fabricated
@@ -1697,17 +1762,24 @@ async def run_trading_engine_loop():
                         await notify_news_blackout(user_id, news_status.get("event", "Unknown Event"))
                         continue
 
-                    # Fetch XAUUSD candles from the public market-data fallback.
+                    # Prefer candles uploaded by the local MT5 terminal.
                     update_bot_status("Fetching Candles", "Downloading M1, M5, M15 OHLC candles for XAUUSD (Gold)...")
-                    m1_candles = fetch_live_candles("XAUUSD", "1m", limit=30)
-                    m5_candles = fetch_live_candles("XAUUSD", "5m", limit=30)
-                    m15_candles = fetch_live_candles("XAUUSD", "15m", limit=30)
-                    current_price = fetch_live_market_data("XAUUSD").get("price", 0.0)
+                    local_data = get_recent_local_market_data("XAUUSD")
+                    if local_data:
+                        m1_candles = local_data["timeframes"]["M1"]
+                        m5_candles = local_data["timeframes"]["M5"]
+                        m15_candles = local_data["timeframes"]["M15"]
+                        current_price = m1_candles[-1]["close"]
+                    else:
+                        m1_candles = fetch_live_candles("XAUUSD", "1m", limit=30)
+                        m5_candles = fetch_live_candles("XAUUSD", "5m", limit=30)
+                        m15_candles = fetch_live_candles("XAUUSD", "15m", limit=30)
+                        current_price = fetch_live_market_data("XAUUSD").get("price", 0.0)
 
                     if not m15_candles or current_price <= 0:
                         update_bot_status(
                             "Market Data Unavailable",
-                            f"User {user_id}: no public XAUUSD candles or price available. Skipping this cycle."
+                            f"User {user_id}: no fresh local MT5 or public XAUUSD candles available. Skipping this cycle."
                         )
                         continue
 

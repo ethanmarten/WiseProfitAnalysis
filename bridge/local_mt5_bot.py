@@ -44,6 +44,7 @@ RENDER_URL = os.getenv("RENDER_SERVER_URL", "https://wiseprofitanalysis.onrender
 MT5_SYMBOL = os.getenv("MT5_SYMBOL", "XAUUSD").strip().upper()
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL_SECONDS", "4"))
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "6"))
+MARKET_DATA_INTERVAL = float(os.getenv("MARKET_DATA_INTERVAL_SECONDS", "30"))
 
 # Treat the connection as dead after this many failed polls in a row.
 MAX_CONSECUTIVE_FAILURES = 10
@@ -129,6 +130,50 @@ def initialize_mt5() -> bool:
     log.info(" Symbol : %s", MT5_SYMBOL)
     log.info("=" * 50)
     return True
+
+
+def send_market_data(symbol: str = "XAUUSD") -> bool:
+    """Upload local M1/M5/M15 candles so Render can run Gemini analysis."""
+    if not mt5.symbol_select(symbol, True):
+        log.warning("Cannot select %s for market-data upload: %s", symbol, mt5.last_error())
+        return False
+
+    timeframe_map = {
+        "M1": mt5.TIMEFRAME_M1,
+        "M5": mt5.TIMEFRAME_M5,
+        "M15": mt5.TIMEFRAME_M15,
+    }
+    timeframes = {}
+    for name, timeframe in timeframe_map.items():
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 50)
+        if rates is None or len(rates) < 3:
+            log.warning("Not enough %s candles for %s: %s", name, symbol, mt5.last_error())
+            return False
+        timeframes[name] = [
+            {
+                "time": int(row["time"]),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "tick_volume": int(row["tick_volume"]),
+            }
+            for row in rates
+        ]
+
+    try:
+        response = _session.post(
+            f"{RENDER_URL}/api/market-data",
+            json={"symbol": symbol, "timeframes": timeframes},
+            timeout=REQUEST_TIMEOUT,
+        )
+        if response.status_code != 200:
+            log.warning("Market-data upload failed (%s): %s", response.status_code, response.text[:200])
+            return False
+        return True
+    except requests.RequestException as exc:
+        log.warning("Market-data upload network error: %s", exc)
+        return False
 
 
 def _symbol_info(symbol: str) -> Optional[Any]:
@@ -221,10 +266,18 @@ def execute_signal(signal: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 def run_loop() -> None:
     """Poll Render for one-time local-execution signals."""
+    global last_processed_signal_id
     consecutive_failures = 0
+    last_market_sync_time = 0.0
 
     while True:
         try:
+            now = time.time()
+            if now - last_market_sync_time >= MARKET_DATA_INTERVAL:
+                if send_market_data(MT5_SYMBOL):
+                    log.info("Uploaded fresh %s M1/M5/M15 candles to Render.", MT5_SYMBOL)
+                last_market_sync_time = now
+
             payload = _session.get(
                 f"{RENDER_URL}/api/signals", timeout=REQUEST_TIMEOUT
             ).json()
