@@ -1,6 +1,5 @@
 """
 main.py - FastAPI Server & Asynchronous AI Algo-Trading SaaS Loop.
-
 Provides REST APIs for dashboard MT5 credential setup, live PnL tracking,
 and runs a continuous background worker that executes Gemini SMC Gold Scalping 24/7.
 
@@ -40,7 +39,6 @@ from database import (
     get_or_create_daily_tracker, AnalysisLog, UserSession, PendingSignal, purge_expired_sessions, utcnow
 )
 from gemini_analyzer import GeminiSMCAnalyzer
-from mt5_executor import MetaApiMT5Executor, get_executor
 from news_filter import EconomicNewsFilter
 from security import hash_password, verify_password, hash_token
 from auth import create_session, revoke_session, current_user, authorize_user_id
@@ -63,32 +61,22 @@ logger = logging.getLogger("main_server")
 init_db()
 
 # ---------------------------------------------------------------------------
-# Trading limits (configurable, previously hard-coded)
+# Trading limits
 # ---------------------------------------------------------------------------
 DAILY_PROFIT_TARGET = float(os.getenv("DAILY_PROFIT_TARGET", "100"))
 MAX_DAILY_SETUPS = int(os.getenv("MAX_DAILY_SETUPS", "5"))
 MIN_SIGNAL_CONFIDENCE = float(os.getenv("MIN_SIGNAL_CONFIDENCE", "0.70"))
 DEFAULT_LOT_SIZE = float(os.getenv("DEFAULT_LOT_SIZE", "0.02"))
 ENGINE_INTERVAL_SECONDS = int(os.getenv("ENGINE_INTERVAL_SECONDS", "60"))
-
-# Bridge mode: when true, the Render engine only PRODUCES signals and writes
-# them to the pending_signals table. A local Windows MT5 bot (running the
-# companion script) claims and executes them. Set to false (default) so the
-# server executes trades directly via MetaApi as before.
-BRIDGE_MODE = os.getenv("BRIDGE_MODE", "false").lower() == "true"
-
-# Trading mode: AUTO = engine executes trades automatically, MANUAL = engine
-# produces signals and waits for user approval/rejection before executing
-TRADING_MODE = os.getenv("TRADING_MODE", "AUTO").upper()
 PENDING_SIGNAL_TTL_SECONDS = int(os.getenv("PENDING_SIGNAL_TTL_SECONDS", "90"))
+TRADING_MODE = "AUTO"
+
+# Signals are always executed by the local MetaTrader 5 bridge.
+BRIDGE_MODE = True
 
 # ---------------------------------------------------------------------------
 # CORS configuration
 # ---------------------------------------------------------------------------
-# Render serves the app on https://*.onrender.com by default. We allow any
-# origin so the dashboard can be embedded in front-ends hosted elsewhere while
-# still being safe because the API is read/write protected by user-level auth
-# in the /api/login flow.
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
 if ALLOWED_ORIGINS.strip() == "*":
     cors_origins = ["*"]
@@ -111,17 +99,17 @@ BOT_LIVE_STATUS = {
 # ---------------------------------------------------------------------------
 class ConnectionManager:
     """Manages active WebSocket connections per user for real-time updates."""
-    
+
     def __init__(self):
         self.active_connections: Dict[int, List[WebSocket]] = {}
-    
+
     async def connect(self, websocket: WebSocket, user_id: int):
         await websocket.accept()
         if user_id not in self.active_connections:
             self.active_connections[user_id] = []
         self.active_connections[user_id].append(websocket)
         logger.info(f"WebSocket connected for user {user_id}. Total connections: {len(self.active_connections[user_id])}")
-    
+
     def disconnect(self, websocket: WebSocket, user_id: int):
         if user_id in self.active_connections:
             self.active_connections[user_id].remove(websocket)
@@ -338,11 +326,8 @@ class RegisterUserRequest(BaseModel):
 
 
 class RegisterAccountRequest(BaseModel):
-    meta_api_token: str = Field(..., json_schema_extra={"example": "your_meta_api_token_here"})
-    account_id: str = Field(..., json_schema_extra={"example": "meta_api_account_id_uuid"})
-    login: str = Field(..., json_schema_extra={"example": "12345678"})
-    password: str = Field(..., json_schema_extra={"example": "secret_password"})
-    server: str = Field(..., json_schema_extra={"example": "Broker-ServerName"})
+    login: Optional[str] = Field(default=None, json_schema_extra={"example": "12345678"})
+    server: Optional[str] = Field(default=None, json_schema_extra={"example": "Broker-ServerName"})
     platform: str = Field(default="mt5", json_schema_extra={"example": "mt5"})
 
 
@@ -483,36 +468,27 @@ async def register_account(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    """Registers or updates the authenticated user's MT5 / MetaApi credentials.
-
-    The MetaApi token and MT5 password are encrypted before they touch the
-    database, so a leaked dump cannot be replayed against a live account.
-    """
+    """Registers the local MT5 account label used by the desktop bridge."""
     mt5_acc = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
     if not mt5_acc:
         mt5_acc = MT5Account(
             user_id=user.id,
-            account_id=req.account_id,
-            login=req.login,
-            server=req.server,
+            account_id="local-mt5",
+            login=req.login or "",
+            server=req.server or "local-terminal",
             platform=req.platform,
             is_connected=False,
             bot_enabled=True,
-            meta_api_token="",
-            password="",
+            legacy_token="",
+            legacy_password="",
         )
         db.add(mt5_acc)
     else:
-        mt5_acc.account_id = req.account_id
-        mt5_acc.login = req.login
-        mt5_acc.server = req.server
+        mt5_acc.account_id = "local-mt5"
+        mt5_acc.login = req.login or ""
+        mt5_acc.server = req.server or "local-terminal"
         mt5_acc.platform = req.platform
-
-    mt5_acc.set_credentials(req.meta_api_token, req.password)
-
-    # Verify the credentials actually connect before claiming success.
-    executor = await get_executor(req.meta_api_token, req.account_id)
-    mt5_acc.is_connected = executor.is_live
+    mt5_acc.is_connected = False
     db.commit()
 
     # Ensure daily tracker exists
@@ -520,12 +496,8 @@ async def register_account(
 
     return {
         "success": True,
-        "message": (
-            "MT5 account connected and verified."
-            if executor.is_live
-            else f"Credentials saved, but MetaApi connection failed: {executor.last_error}"
-        ),
-        "connected": executor.is_live,
+        "message": "Local MT5 bridge configuration saved. Start the local MetaTrader 5 script to trade.",
+        "connected": False,
         "user_id": user.id,
         "email": user.email,
         "bot_enabled": mt5_acc.bot_enabled,
@@ -546,19 +518,8 @@ async def get_dashboard_data(
     recent_trades = db.query(TradeLog).filter(TradeLog.user_id == user.id).order_by(TradeLog.executed_at.desc()).limit(10).all()
     recent_analyses = db.query(AnalysisLog).filter(AnalysisLog.user_id == user.id).order_by(AnalysisLog.analyzed_at.desc()).limit(6).all()
 
-    account_info = {"balance": 0.0, "equity": 0.0, "status": "Disconnected (Enter Credentials Below)"}
+    account_info = {"balance": 0.0, "equity": 0.0, "status": "Local MT5 bridge"}
     open_positions = []
-
-    token = mt5_acc.plain_meta_api_token if mt5_acc else None
-    if mt5_acc and token:
-        executor = await get_executor(token, mt5_acc.account_id)
-        info = await executor.get_account_information()
-        account_info = {
-            "balance": info.get("balance", 0.0),
-            "equity": info.get("equity", 0.0),
-            "status": "Connected" if executor.is_live else f"Offline: {executor.last_error or 'not connected'}",
-        }
-        open_positions = await executor.get_open_positions()
 
     return {
         "user_id": user.id,
@@ -656,6 +617,37 @@ async def list_pending_signals(
         .all()
     )
     return {"success": True, "count": len(rows), "signals": [_signal_to_dict(r) for r in rows]}
+
+
+@app.get("/api/signals")
+async def get_latest_public_signal(db: Session = Depends(get_db)):
+    """Returns the newest unexecuted signal for the local MT5 polling client."""
+    row = (
+        db.query(PendingSignal)
+        .filter(PendingSignal.status == "PENDING", PendingSignal.expires_at > utcnow())
+        .order_by(PendingSignal.created_at.desc())
+        .first()
+    )
+    if not row:
+        return {"signal": None}
+
+    # The supplied local client has no acknowledgement request. Claim on read
+    # so a restart or second client cannot execute the same signal twice.
+    row.status = "CLAIMED"
+    row.claimed_at = utcnow()
+    db.commit()
+
+    return {
+        "signal": {
+            "id": str(row.id),
+            "symbol": row.symbol,
+            "action": row.action,
+            "lots": row.lots,
+            "sl": row.stop_loss,
+            "tp": row.take_profit,
+            "timestamp": int(row.created_at.timestamp()) if row.created_at else int(utcnow().timestamp()),
+        }
+    }
 
 
 @app.post("/api/signals/{signal_id}/claim")
@@ -762,12 +754,7 @@ async def approve_manual_signal(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    """Approve a manually-queued signal to execute the trade automatically.
-
-    This is called from the dashboard when the user clicks 'Approve' on a
-    pending manual signal. The signal is then executed via MetaApi just like
-    an auto-mode trade.
-    """
+    """Reject server-side execution; the local MT5 bridge executes signals."""
     row = db.query(PendingSignal).filter(
         PendingSignal.id == signal_id,
         PendingSignal.user_id == user.id,
@@ -783,78 +770,7 @@ async def approve_manual_signal(
         db.commit()
         raise HTTPException(status_code=410, detail="Signal expired before approval.")
 
-    # Execute the trade via MetaApi (same logic as AUTO mode)
-    from mt5_executor import get_executor
-    executor = await get_executor(row.meta_api_token, row.account_id) if hasattr(row, 'meta_api_token') else None
-
-    # We need the MetaApi credentials - get them from the user's MT5 account
-    mt5_acc = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
-    if not mt5_acc:
-        raise HTTPException(status_code=404, detail="MT5 account not found for user.")
-
-    executor = await get_executor(mt5_acc.plain_meta_api_token, mt5_acc.account_id)
-
-    lots = float(row.lots)
-    action = row.action.upper()
-    sl = row.stop_loss
-    tp = row.take_profit
-
-    trade_result = await executor.execute_trade(
-        symbol="XAUUSD",
-        action=action,
-        lots=lots,
-        stop_loss=sl,
-        take_profit=tp,
-        comment="Manual_Approval"
-    )
-
-    if trade_result.get("success"):
-        log_entry = TradeLog(
-            user_id=user.id,
-            position_id=trade_result.get("position_id"),
-            symbol="XAUUSD",
-            order_type=action,
-            lots=lots,
-            entry_price=trade_result.get("entry_price") or row.entry_price,
-            stop_loss=sl,
-            take_profit=tp,
-            status="OPEN",
-            gemini_reasoning=row.reasoning,
-        )
-        db.add(log_entry)
-        tracker = get_or_create_daily_tracker(db, user.id)
-        tracker.daily_setup_count += 1
-        row.status = "EXECUTED"
-        row.acknowledged_at = utcnow()
-        db.commit()
-
-        await notify_trade_executed(user.id, {
-            "symbol": "XAUUSD",
-            "action": action,
-            "lots": lots,
-            "entry_price": trade_result.get("entry_price"),
-            "position_id": trade_result.get("position_id"),
-            "status": "OPEN",
-        })
-
-        return {
-            "success": True,
-            "message": "Trade approved and executed successfully.",
-            "signal_id": row.id,
-            "position_id": trade_result.get("position_id"),
-        }
-    else:
-        row.status = "FAILED"
-        row.execution_error = trade_result.get("error", "Unknown error")
-        db.commit()
-
-        await notify_error(user.id, f"فشل تنفيذ الصفقة المعتمدة: {trade_result.get('error', 'unknown error')}")
-
-        return {
-            "success": False,
-            "message": f"Trade approval failed: {trade_result.get('error', 'unknown error')}",
-            "signal_id": row.id,
-        }
+    raise HTTPException(status_code=409, detail="Signals are executed only by the local MetaTrader 5 bridge.")
 
 
 @app.post("/api/toggle-bot")
@@ -910,12 +826,7 @@ async def approve_manual_signal(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    """Approve a manually-queued signal to execute the trade automatically.
-
-    This is called from the dashboard when the user clicks 'Approve' on a
-    pending manual signal. The signal is then executed via MetaApi just like
-    an auto-mode trade.
-    """
+    """Reject server-side execution; the local MT5 bridge executes signals."""
     row = db.query(PendingSignal).filter(
         PendingSignal.id == signal_id,
         PendingSignal.user_id == user.id,
@@ -931,74 +842,7 @@ async def approve_manual_signal(
         db.commit()
         raise HTTPException(status_code=410, detail="Signal expired before approval.")
 
-    # Execute the trade via MetaApi (same logic as AUTO mode)
-    mt5_acc = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
-    if not mt5_acc:
-        raise HTTPException(status_code=404, detail="MT5 account not found for user.")
-
-    executor = await get_executor(mt5_acc.plain_meta_api_token, mt5_acc.account_id)
-
-    lots = float(row.lots)
-    action = row.action.upper()
-    sl = row.stop_loss
-    tp = row.take_profit
-
-    trade_result = await executor.execute_trade(
-        symbol="XAUUSD",
-        action=action,
-        lots=lots,
-        stop_loss=sl,
-        take_profit=tp,
-        comment="Manual_Approval"
-    )
-
-    if trade_result.get("success"):
-        log_entry = TradeLog(
-            user_id=user.id,
-            position_id=trade_result.get("position_id"),
-            symbol="XAUUSD",
-            order_type=action,
-            lots=lots,
-            entry_price=trade_result.get("entry_price") or row.entry_price,
-            stop_loss=sl,
-            take_profit=tp,
-            status="OPEN",
-            gemini_reasoning=row.reasoning,
-        )
-        db.add(log_entry)
-        tracker = get_or_create_daily_tracker(db, user.id)
-        tracker.daily_setup_count += 1
-        row.status = "EXECUTED"
-        row.acknowledged_at = utcnow()
-        db.commit()
-
-        await notify_trade_executed(user.id, {
-            "symbol": "XAUUSD",
-            "action": action,
-            "lots": lots,
-            "entry_price": trade_result.get("entry_price"),
-            "position_id": trade_result.get("position_id"),
-            "status": "OPEN",
-        })
-
-        return {
-            "success": True,
-            "message": "Trade approved and executed successfully.",
-            "signal_id": row.id,
-            "position_id": trade_result.get("position_id"),
-        }
-    else:
-        row.status = "FAILED"
-        row.execution_error = trade_result.get("error", "Unknown error")
-        db.commit()
-
-        await notify_error(user.id, f"فشل تنفيذ الصفقة المعتمدة: {trade_result.get('error', 'unknown error')}")
-
-        return {
-            "success": False,
-            "message": f"Trade approval failed: {trade_result.get('error', 'unknown error')}",
-            "signal_id": row.id,
-        }
+    raise HTTPException(status_code=409, detail="Signals are executed only by the local MetaTrader 5 bridge.")
 
 
 @app.post("/api/toggle-bot")
@@ -1702,24 +1546,9 @@ async def analyze_symbol_on_demand(
     current_price = live_data["price"]
     m1_candles, m5_candles, m15_candles = [], [], []
 
-    token = mt5_acc.plain_meta_api_token if mt5_acc else None
-    if token:
-        try:
-            executor = await get_executor(token, mt5_acc.account_id)
-            if executor.is_live:
-                m1_candles = await executor.fetch_candles(symbol, "1m", limit=30)
-                m5_candles = await executor.fetch_candles(symbol, "5m", limit=30)
-                m15_candles = await executor.fetch_candles(symbol, "15m", limit=30)
-                live_p = await executor.get_current_price(symbol)
-                if live_p > 0:
-                    current_price = live_p
-        except Exception as e:
-            logger.warning(f"Could not fetch MT5 candles for {symbol}: {e}")
-
-    if not m15_candles:
-        m1_candles = fetch_live_candles(symbol, "1m", limit=30)
-        m5_candles = fetch_live_candles(symbol, "5m", limit=30)
-        m15_candles = fetch_live_candles(symbol, "15m", limit=30)
+    m1_candles = fetch_live_candles(symbol, "1m", limit=30)
+    m5_candles = fetch_live_candles(symbol, "5m", limit=30)
+    m15_candles = fetch_live_candles(symbol, "15m", limit=30)
 
     if not m15_candles:
         # No real market data available anywhere. Previously this fabricated
@@ -1780,7 +1609,7 @@ async def analyze_symbol_on_demand(
 async def run_trading_engine_loop():
     """
     Continuous async background loop running 24/7.
-    Evaluates market setups using Gemini AI, executes trades via MetaApi,
+    Evaluates market setups using Gemini AI and queues signals for local MT5,
     and enforces strict $100 daily profit caps & 5 setup/day limits.
     Sends real-time notifications via WebSocket to connected clients.
     """
@@ -1816,44 +1645,10 @@ async def run_trading_engine_loop():
                     user_id = mt5_acc.user_id
                     tracker = get_or_create_daily_tracker(db, user_id)
 
-                    api_token = mt5_acc.plain_meta_api_token
-                    if not api_token:
-                        update_bot_status(
-                            "Credential Error",
-                            f"User {user_id}: stored MetaApi token could not be decrypted. Re-enter credentials."
-                        )
-                        await notify_error(user_id, "الرمز المميز لـ MetaApi غير صالح. يرجى إعادة إدخال بيانات الاعتماد.")
-                        continue
-
-                    executor = await get_executor(api_token, mt5_acc.account_id)
-
-                    # Persist the real connection state so the dashboard is honest.
-                    if mt5_acc.is_connected != executor.is_live:
-                        mt5_acc.is_connected = executor.is_live
-                        db.commit()
-
-                    if not executor.is_live:
-                        if BRIDGE_MODE:
-                            # In bridge mode we don't require a live MetaApi
-                            # connection; the local bot will execute the trade.
-                            update_bot_status(
-                                "Bridge Mode",
-                                f"User {user_id}: MetaApi offline, queuing signals for the local Windows bot instead."
-                            )
-                        else:
-                            update_bot_status(
-                                "MT5 Disconnected",
-                                f"User {user_id}: {executor.last_error or 'MetaApi connection unavailable'}. Skipping cycle."
-                            )
-                            continue
-
-                    # Refresh PnL from the broker before evaluating any limit.
-                    realized_pnl = await executor.get_today_realized_profit()
-                    unrealized_pnl = await executor.get_unrealized_pnl()
-                    tracker.realized_pnl = realized_pnl
-                    tracker.unrealized_pnl = unrealized_pnl
-                    tracker.total_pnl = realized_pnl + unrealized_pnl
-                    db.commit()
+                    update_bot_status(
+                        "Local Bridge Mode",
+                        f"User {user_id}: generating signals for the local MetaTrader 5 client."
+                    )
 
                     # Notify PnL update to connected clients
                     await notify_profit_update(user_id, {
@@ -1874,8 +1669,9 @@ async def run_trading_engine_loop():
                             tracker.target_cap_reached = True
                             tracker.is_locked_for_day = True
                             db.commit()
-                            closed = await executor.close_all_positions_due_to_profit_cap()
-                            logger.info(f"Closed {closed} open position(s) for user {user_id} after hitting the cap.")
+                            logger.info(
+                                "Local MT5 bridge must close open positions after the daily cap is reached."
+                            )
                             await notify_daily_limit_reached(user_id, "profit")
 
                         update_bot_status(
@@ -1901,17 +1697,17 @@ async def run_trading_engine_loop():
                         await notify_news_blackout(user_id, news_status.get("event", "Unknown Event"))
                         continue
 
-                    # Fetch XAUUSD candles for M1, M5, M15.
+                    # Fetch XAUUSD candles from the public market-data fallback.
                     update_bot_status("Fetching Candles", "Downloading M1, M5, M15 OHLC candles for XAUUSD (Gold)...")
-                    m1_candles = await executor.fetch_candles("XAUUSD", "1m", limit=30)
-                    m5_candles = await executor.fetch_candles("XAUUSD", "5m", limit=30)
-                    m15_candles = await executor.fetch_candles("XAUUSD", "15m", limit=30)
-                    current_price = await executor.get_current_price("XAUUSD")
+                    m1_candles = fetch_live_candles("XAUUSD", "1m", limit=30)
+                    m5_candles = fetch_live_candles("XAUUSD", "5m", limit=30)
+                    m15_candles = fetch_live_candles("XAUUSD", "15m", limit=30)
+                    current_price = fetch_live_market_data("XAUUSD").get("price", 0.0)
 
                     if not m15_candles or current_price <= 0:
                         update_bot_status(
                             "Market Data Unavailable",
-                            f"User {user_id}: no XAUUSD candles or price from MetaApi. Skipping this cycle."
+                            f"User {user_id}: no public XAUUSD candles or price available. Skipping this cycle."
                         )
                         continue
 
@@ -2063,58 +1859,7 @@ async def run_trading_engine_loop():
                             })
                             continue
 
-                        # --- AUTO MODE: Execute directly via MetaApi ---
-                        trade_result = await executor.execute_trade(
-                            symbol="XAUUSD",
-                            action=action,
-                            lots=lots,
-                            stop_loss=sl,
-                            take_profit=tp,
-                            comment="Gemini_SMC"
-                        )
-
-                        if trade_result.get("success"):
-                            log_entry = TradeLog(
-                                user_id=user_id,
-                                position_id=trade_result.get("position_id"),
-                                symbol="XAUUSD",
-                                order_type=action,
-                                lots=lots,
-                                entry_price=trade_result.get("entry_price") or current_price,
-                                stop_loss=sl,
-                                take_profit=tp,
-                                status="OPEN",
-                                gemini_reasoning=signal.get("reasoning")
-                            )
-                            db.add(log_entry)
-                            tracker.daily_setup_count += 1
-                            db.commit()
-
-                            update_bot_status(
-                                "Trade Executed",
-                                f"Position opened. Daily setups: {tracker.daily_setup_count}/{MAX_DAILY_SETUPS}"
-                            )
-                            logger.info(
-                                f"Trade executed and logged for user {user_id}. "
-                                f"Daily setups: {tracker.daily_setup_count}/{MAX_DAILY_SETUPS}"
-                            )
-                            
-                            # Notify trade execution to connected clients
-                            await notify_trade_executed(user_id, {
-                                "symbol": "XAUUSD",
-                                "action": action,
-                                "lots": lots,
-                                "entry_price": trade_result.get("entry_price"),
-                                "position_id": trade_result.get("position_id"),
-                                "status": "OPEN",
-                            })
-                        else:
-                            update_bot_status(
-                                "Trade Rejected",
-                                f"Order not placed: {trade_result.get('error', 'unknown error')}"
-                            )
-                            logger.error(f"Trade execution failed for user {user_id}: {trade_result.get('error')}")
-                            await notify_error(user_id, f"فشل تنفيذ الصفقة: {trade_result.get('error', 'unknown error')}")
+                        continue
                     else:
                         reasoning_msg = signal.get("reasoning", "No trade setup.")
                         update_bot_status(

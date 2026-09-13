@@ -1118,27 +1118,15 @@
           <input type="email" id="email" class="form-control" readonly disabled />
         </div>
         <div class="form-group">
-          <label>MetaApi API Token</label>
-          <input type="password" id="metaApiToken" class="form-control" placeholder="MetaApi Token" required />
+          <label>Local MT5 Login (optional)</label>
+          <input type="text" id="login" class="form-control" placeholder="12345678" />
         </div>
         <div class="form-group">
-          <label>MetaApi Account ID</label>
-          <input type="text" id="accountId" class="form-control" placeholder="Account ID UUID" required />
-        </div>
-        <div class="form-group">
-          <label>MT5 Login Number</label>
-          <input type="text" id="login" class="form-control" placeholder="12345678" required />
-        </div>
-        <div class="form-group">
-          <label>MT5 Password</label>
-          <input type="password" id="password" class="form-control" placeholder="Password" required />
-        </div>
-        <div class="form-group">
-          <label>MT5 Server</label>
-          <input type="text" id="server" class="form-control" placeholder="Broker-ServerName" required />
+          <label>Local MT5 Server (optional)</label>
+          <input type="text" id="server" class="form-control" placeholder="Broker-ServerName" />
         </div>
         <button type="submit" class="btn-analyze" style="width: 100%; justify-content: center; margin-top: 16px;">
-          <i class="fa-solid fa-save"></i> Save & Connect 24/7 Bot
+          <i class="fa-solid fa-save"></i> Save Local MT5 Bridge
         </button>
       </form>
     </div>
@@ -1578,7 +1566,7 @@
         }
 
         // --- Trade Visualizer Activation ---
-        // Prefer live open_positions (real-time SL/TP/PnL from MetaApi).
+        // Prefer live open_positions when a local bridge report is available.
         // Fallback: most recent OPEN trade from the audit log.
         let visualizerTrade = null;
         if (data.open_positions && data.open_positions.length > 0) {
@@ -1693,10 +1681,7 @@
     document.getElementById('credentialsForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const data = {
-        meta_api_token: document.getElementById('metaApiToken').value,
-        account_id: document.getElementById('accountId').value,
         login: document.getElementById('login').value,
-        password: document.getElementById('password').value,
         server: document.getElementById('server').value,
         platform: "mt5"
       };

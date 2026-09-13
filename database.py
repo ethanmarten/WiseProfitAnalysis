@@ -14,8 +14,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 
-from security import encrypt_secret, decrypt_secret
-
 logger = logging.getLogger("database")
 
 
@@ -73,7 +71,7 @@ class User(Base):
     daily_trackers = relationship("DailyProfitTracker", back_populates="user", cascade="all, delete-orphan")
     trade_logs = relationship("TradeLog", back_populates="user", cascade="all, delete-orphan")
     analysis_logs = relationship("AnalysisLog", back_populates="user", cascade="all, delete-orphan")
-    pending_signals = relationship("PendingSignal", cascade="all, delete-orphan")
+    pending_signals = relationship("PendingSignal", back_populates="user", cascade="all, delete-orphan")
     sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
 
 
@@ -95,39 +93,24 @@ class UserSession(Base):
 
 
 class MT5Account(Base):
-    """Stores user MT5 Credentials and MetaApi cloud tokens."""
+    """Stores local MT5 account metadata; trading runs on the user's PC."""
     __tablename__ = "mt5_accounts"
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
-    meta_api_token = Column(String(512), nullable=False)  # Encrypted at rest
-    account_id = Column(String(255), nullable=False)  # MetaApi Account ID
-    login = Column(String(100), nullable=False)
-    password = Column(String(512), nullable=False)  # Encrypted at rest
-    server = Column(String(100), nullable=False)
+    account_id = Column(String(255), nullable=False, default="local-mt5")
+    login = Column(String(100), nullable=True)
+    server = Column(String(100), nullable=True)
+    # Legacy columns remain nullable so existing databases can be upgraded.
+    # They are never read, written with credentials, or used for execution.
+    legacy_token = Column("meta_api_token", String(512), nullable=True)
+    legacy_password = Column("password", String(512), nullable=True)
     platform = Column(String(10), default="mt5")  # mt4 or mt5
     is_connected = Column(Boolean, default=False)
     bot_enabled = Column(Boolean, default=True)
     created_at = Column(DateTime, default=utcnow)
 
     user = relationship("User", back_populates="mt5_account")
-
-    # --- Transparent encryption helpers -----------------------------------
-    def set_credentials(self, meta_api_token: str, mt5_password: str) -> None:
-        """Stores sensitive credentials encrypted with the app SECRET_KEY."""
-        self.meta_api_token = encrypt_secret(meta_api_token)
-        self.password = encrypt_secret(mt5_password)
-
-    @property
-    def plain_meta_api_token(self) -> Optional[str]:
-        """Decrypted MetaApi token for use by the execution engine."""
-        return decrypt_secret(self.meta_api_token)
-
-    @property
-    def plain_password(self) -> Optional[str]:
-        """Decrypted MT5 password."""
-        return decrypt_secret(self.password)
-
 
 class DailyProfitTracker(Base):
     """Tracks daily cumulative PnL, setup count, and enforces $100 profit cap."""
@@ -212,7 +195,7 @@ class PendingSignal(Base):
     created_at = Column(DateTime, default=utcnow, index=True)
     expires_at = Column(DateTime, nullable=False, index=True)
 
-    user = relationship("User")
+    user = relationship("User", back_populates="pending_signals")
 
 
 class AnalysisLog(Base):

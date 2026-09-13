@@ -5,22 +5,14 @@ Run this on the Windows PC that has MetaTrader 5 installed and an active
 broker login. It:
 
   1. Initializes MT5 (terminal must already be logged in to the broker account).
-  2. Logs in to the WiseProfit dashboard (email + password) and stores the
-     bearer token in memory for the lifetime of the script.
-  3. Polls the Render server's /api/signals/pending endpoint every few seconds.
-  4. For each pending signal:
-       - claims it (POST /api/signals/{id}/claim) to lock it server-side,
-       - executes the order via MetaTrader5.order_send,
-       - acknowledges the outcome (POST /api/signals/{id}/ack) with the
-         position id, actual fill price, and any error retcode.
+    2. Polls the Render server's public /api/signals endpoint every few seconds.
+    3. Executes the delivered signal via MetaTrader5.order_send.
 
 The token is fetched at startup, NOT hard-coded, so rotating your WiseProfit
 password does not require updating this file. Keep it next to a .env that
 sets:
 
     RENDER_SERVER_URL=https://wiseprofitanalysis.onrender.com
-    WP_EMAIL=your@email.com
-    WP_PASSWORD=your-strong-password
     MT5_SYMBOL=XAUUSD
     POLL_INTERVAL_SECONDS=4
 
@@ -49,8 +41,6 @@ load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 RENDER_URL = os.getenv("RENDER_SERVER_URL", "https://wiseprofitanalysis.onrender.com").rstrip("/")
-WP_EMAIL = os.getenv("WP_EMAIL", "").strip()
-WP_PASSWORD = os.getenv("WP_PASSWORD", "")
 MT5_SYMBOL = os.getenv("MT5_SYMBOL", "XAUUSD").strip().upper()
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL_SECONDS", "4"))
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "6"))
@@ -230,45 +220,23 @@ def execute_signal(signal: Dict[str, Any]) -> Dict[str, Any]:
 # Main poll loop
 # ---------------------------------------------------------------------------
 def run_loop() -> None:
-    """Poll Render for pending signals and execute each one."""
+    """Poll Render for one-time local-execution signals."""
     consecutive_failures = 0
 
     while True:
         try:
-            pending = _get("/api/signals/pending")
-            signals = pending.get("signals") or []
-
-            for sig in signals:
-                if sig.get("status") not in ("PENDING", "CLAIMED"):
-                    continue
-
-                log.info(
-                    "Claiming signal #%s: %s %.2f %s @ %.2f (conf=%.0f%%)",
-                    sig["id"], sig["action"], sig["lots"], sig["symbol"],
-                    sig["entry_price"], sig.get("confidence", 0) * 100,
-                )
-                claimed = _post(f"/api/signals/{sig['id']}/claim", {})
-                claim_token = claimed.get("claim_token")
-                if not claim_token:
-                    log.warning("Claim did not return a token: %s", claimed)
-                    continue
-
-                outcome = execute_signal(claimed.get("signal") or sig)
-                _post(
-                    f"/api/signals/{sig['id']}/ack",
-                    {
-                        "claim_token": claim_token,
-                        "status": outcome["status"],
-                        "position_id": outcome.get("position_id"),
-                        "entry_price": outcome.get("entry_price"),
-                        "error": outcome.get("error"),
-                    },
-                )
-                log.info(
-                    "Signal #%s acknowledged (%s).",
-                    sig["id"],
-                    outcome["status"].upper(),
-                )
+            payload = _session.get(
+                f"{RENDER_URL}/api/signals", timeout=REQUEST_TIMEOUT
+            ).json()
+            sig = payload.get("signal")
+            if sig:
+                signal_id = str(sig.get("id"))
+                if signal_id != str(last_processed_signal_id):
+                    log.info("New signal #%s: %s on %s", signal_id, sig["action"], sig["symbol"])
+                    outcome = execute_signal(sig)
+                    if outcome["status"] == "executed":
+                        last_processed_signal_id = signal_id
+                    log.info("Signal #%s result: %s", signal_id, outcome["status"])
 
             consecutive_failures = 0
 
@@ -309,13 +277,6 @@ def run_loop() -> None:
 def main() -> None:
     if not initialize_mt5():
         sys.exit(1)
-    try:
-        _login()
-    except BridgeError as e:
-        log.error("Initial login failed: %s", e)
-        mt5.shutdown()
-        sys.exit(2)
-
     log.info("Starting poll loop (interval=%.1fs). Press Ctrl+C to stop.", POLL_INTERVAL)
     try:
         run_loop()

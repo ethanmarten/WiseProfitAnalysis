@@ -39,12 +39,10 @@ services:
         value: "INFO"
       - key: ENV
         value: "production"
-      - key: ALLOW_MOCK_TRADING
-        value: "false"
       - key: NEWS_FILTER_FAIL_OPEN
         value: "false"
       - key: BRIDGE_MODE
-        value: "false"
+        value: "true"
       - key: PENDING_SIGNAL_TTL_SECONDS
         value: "90"
 
