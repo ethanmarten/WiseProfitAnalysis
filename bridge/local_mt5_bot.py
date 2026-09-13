@@ -57,6 +57,7 @@ log = logging.getLogger("wp-bridge")
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": "WiseProfit-Bridge/1.0"})
+last_processed_signal_id = None
 
 
 # ---------------------------------------------------------------------------
@@ -195,8 +196,8 @@ def execute_signal(signal: Dict[str, Any]) -> Dict[str, Any]:
     symbol = signal.get("symbol", MT5_SYMBOL).upper()
     action = signal.get("action", "").upper()
     lots = float(signal.get("lots", 0.01))
-    sl = signal.get("stop_loss")
-    tp = signal.get("take_profit")
+    sl = signal.get("sl", signal.get("stop_loss"))
+    tp = signal.get("tp", signal.get("take_profit"))
 
     if action not in ("BUY", "SELL"):
         return {"status": "failed", "error": f"Unknown action '{action}'"}

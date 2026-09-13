@@ -17,8 +17,8 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger("gemini_analyzer")
 
-# Model is configurable so a deprecated default never silently breaks the bot.
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+# Model is configurable; use the current model recommended by the API response.
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 # Minimum acceptable risk-to-reward ratio enforced locally, independent of what
 # the model claims in its response.
