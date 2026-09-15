@@ -13,6 +13,7 @@ import logging
 import re
 from random import uniform
 from typing import Dict, Any, List, Optional
+import requests
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -25,6 +26,8 @@ DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 # explicitly configured because model availability differs between accounts.
 FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 MODEL_RETRIES = max(1, int(os.getenv("GEMINI_MODEL_RETRIES", "2")))
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 # Minimum acceptable risk-to-reward ratio enforced locally, independent of what
 # the model claims in its response.
@@ -75,6 +78,58 @@ class GeminiSMCAnalyzer:
                 f"{time_str} | {o:.2f} | {h:.2f} | {l:.2f} | {cl:.2f} | {v:.0f}"
             )
         return "\n".join(lines)
+
+    @staticmethod
+    def _is_valid_key(key: Optional[str]) -> bool:
+        if not key:
+            return False
+        invalid_placeholders = {"your_api_key", "change_me", "xxx"}
+        return key.strip().lower() not in invalid_placeholders
+
+    async def _analyze_with_groq(
+        self,
+        prompt: str,
+        system_instruction: str,
+    ) -> Dict[str, Any]:
+        """Uses Groq's OpenAI-compatible API when Gemini is unavailable."""
+        groq_key = os.getenv("GROQ_API_KEY")
+        if not self._is_valid_key(groq_key):
+            raise RuntimeError("GROQ_API_KEY is not configured")
+
+        def request_sync() -> Dict[str, Any]:
+            response = requests.post(
+                GROQ_API_URL,
+                headers={
+                    "Authorization": f"Bearer {groq_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": os.getenv("GROQ_MODEL", GROQ_MODEL),
+                    "messages": [
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.1,
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=45,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            content = payload["choices"][0]["message"]["content"]
+            if isinstance(content, list):
+                content = "".join(part.get("text", "") for part in content)
+            content = str(content).strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            result = json.loads(content)
+            if not isinstance(result, dict):
+                raise ValueError("Groq returned a non-object JSON response")
+            return result
+
+        result = await asyncio.to_thread(request_sync)
+        result.setdefault("reasoning", "")
+        return result
 
     @staticmethod
     def _is_transient_api_error(error: Exception) -> bool:
@@ -140,11 +195,11 @@ class GeminiSMCAnalyzer:
             self.api_key = env_key
             self.client = genai.Client(api_key=env_key)
 
-        if not self._is_valid_key(self.api_key):
+        if not self._is_valid_key(self.api_key) and not self._is_valid_key(os.getenv("GROQ_API_KEY")):
             return {
                 "action": "HOLD",
                 "confidence": 0.0,
-                "reasoning": "GEMINI_API_KEY is missing or invalid placeholder in .env. Please set a valid Gemini API key from AI Studio."
+                "reasoning": "No valid GEMINI_API_KEY or GROQ_API_KEY is configured."
             }
 
         if not m1_candles and not m5_candles and not m15_candles:
@@ -159,17 +214,25 @@ class GeminiSMCAnalyzer:
         m15_text = self.format_candles_summary(m15_candles)
 
         system_instruction = """
-        You are an elite Institutional Algo Trader specializing in Smart Money Concepts (SMC) and Inner Circle Trader (ICT) methodology for XAUUSD (Gold).
-        Your core objective is high-probability intraday scalping.
-        
-        Strict Rules for Analysis:
-        1. Identify Higher Timeframe (M15) bias, Key Highs/Lows, and Premium/Discount Zones.
-        2. Identify M5 Change of Character (CHoCH) or Market Structure Shift (MSS).
-        3. Identify M1/M5 Fair Value Gap (FVG) or Order Block (OB) for precise entry.
-        4. Detect Liquidity Sweeps (ruling out false breakouts above buy-side or below sell-side liquidity).
-        5. Stop Loss MUST be placed beyond the recent swing high/low (max 30-50 pips / $3-$5 in Gold).
-        6. Take Profit MUST yield a Risk-to-Reward Ratio (RRR) of at least 1:2.0.
-        7. If conditions are ambiguous, returning 'HOLD' is MANDATORY. Never force trades.
+        You are a disciplined institutional market-structure analyst for XAUUSD and other liquid assets.
+        Read the market as a complete auction, not as an isolated candle or indicator.
+
+        Analyze in this order:
+        1. Establish M15 directional bias, trend/range condition, dealing range, premium/discount,
+           recent swing highs/lows, and important support/resistance.
+        2. Use M5 to confirm or reject that bias through BOS, CHoCH/MSS, displacement, and whether
+           price is accepting or rejecting a key level.
+        3. Use M1 only for execution timing: liquidity sweep, FVG or order-block reaction,
+           retest quality, and evidence of trapped traders or a false breakout.
+        4. Explain who is likely in control (buyers, sellers, or neither), where liquidity rests,
+           and whether the current move is continuation, reversal, or noise.
+        5. Do not invent news or fundamental events. Treat news as unknown unless it is supplied.
+        6. Return BUY or SELL only when the higher-timeframe bias, structure confirmation, and
+           execution trigger agree. Otherwise return HOLD with confidence 0.0-0.69.
+        7. For BUY: stop_loss < entry_price < take_profit. For SELL: take_profit < entry_price < stop_loss.
+           Risk-reward must be at least 1.8, and the stop must be beyond meaningful structure.
+        8. Return ONLY valid JSON with exactly these fields: action, confidence, entry_price,
+           stop_loss, take_profit, risk_reward_ratio, setup_type, reasoning.
         """
 
         prompt = f"""
@@ -189,6 +252,9 @@ class GeminiSMCAnalyzer:
         """
 
         try:
+            if self.client is None:
+                raise RuntimeError("Gemini client is not configured")
+
             models = [self.model_name]
             if FALLBACK_MODEL and FALLBACK_MODEL not in models:
                 models.append(FALLBACK_MODEL)
@@ -202,19 +268,20 @@ class GeminiSMCAnalyzer:
                     last_error = error
                     if not self._is_transient_api_error(error) or model == models[-1]:
                         raise
-                    logger.warning(
-                        "Gemini model %s is temporarily unavailable; trying fallback model %s: %s",
-                        model,
-                        FALLBACK_MODEL,
-                        error,
-                    )
+                    logger.warning("Gemini model %s unavailable; trying configured model fallback: %s", model, error)
 
             if response is None:
                 raise last_error or RuntimeError("Gemini returned no response")
 
-            raw_json = response.text
-            signal_data = json.loads(raw_json)
+            signal_data = json.loads(response.text)
             signal_data.setdefault("reasoning", "")
+
+        except Exception as gemini_error:
+            groq_key = os.getenv("GROQ_API_KEY")
+            if not self._is_valid_key(groq_key):
+                raise
+            logger.warning("Gemini analysis failed; switching to Groq: %s", gemini_error)
+            signal_data = await self._analyze_with_groq(prompt, system_instruction)
 
             # Extra sanity check for Gold (XAUUSD) SL/TP boundaries
             action = signal_data.get("action", "HOLD").upper()

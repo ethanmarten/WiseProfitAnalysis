@@ -24,6 +24,10 @@ services:
         value: "3.11.9"
       - key: GEMINI_API_KEY
         sync: false           # you must enter this in the Render dashboard
+      - key: GROQ_API_KEY
+        sync: false           # optional fallback provider
+      - key: GROQ_MODEL
+        value: "llama-3.3-70b-versatile"
       - key: SECRET_KEY
         generateValue: true   # signs sessions and encrypts stored MT5 credentials
       - key: DATABASE_URL
