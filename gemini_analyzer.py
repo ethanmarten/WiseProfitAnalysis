@@ -21,7 +21,9 @@ logger = logging.getLogger("gemini_analyzer")
 
 # Model is configurable; use the current model recommended by the API response.
 DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+# Keep the current supported model as the only default. A fallback must be
+# explicitly configured because model availability differs between accounts.
+FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 MODEL_RETRIES = max(1, int(os.getenv("GEMINI_MODEL_RETRIES", "2")))
 
 # Minimum acceptable risk-to-reward ratio enforced locally, independent of what
