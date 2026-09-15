@@ -10,6 +10,8 @@ import asyncio
 import os
 import json
 import logging
+import re
+from random import uniform
 from typing import Dict, Any, List, Optional
 from google import genai
 from google.genai import types
@@ -19,6 +21,8 @@ logger = logging.getLogger("gemini_analyzer")
 
 # Model is configurable; use the current model recommended by the API response.
 DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+MODEL_RETRIES = max(1, int(os.getenv("GEMINI_MODEL_RETRIES", "2")))
 
 # Minimum acceptable risk-to-reward ratio enforced locally, independent of what
 # the model claims in its response.
@@ -69,6 +73,47 @@ class GeminiSMCAnalyzer:
                 f"{time_str} | {o:.2f} | {h:.2f} | {l:.2f} | {cl:.2f} | {v:.0f}"
             )
         return "\n".join(lines)
+
+    @staticmethod
+    def _is_transient_api_error(error: Exception) -> bool:
+        """Returns true for temporary provider capacity or rate-limit errors."""
+        message = str(error).lower()
+        return bool(re.search(r"(?:code['\"]?\s*[:=]\s*|\b)(429|500|502|503|504)\b", message))
+
+    async def _generate_content(
+        self,
+        model: str,
+        prompt: str,
+        system_instruction: str,
+    ) -> Any:
+        """Calls Gemini with bounded retries for temporary service failures."""
+        for attempt in range(MODEL_RETRIES):
+            try:
+                return await asyncio.to_thread(
+                    lambda: self.client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            response_mime_type="application/json",
+                            response_schema=SMCTradeSignal,
+                            temperature=0.1,
+                        ),
+                    )
+                )
+            except Exception as error:
+                if not self._is_transient_api_error(error) or attempt == MODEL_RETRIES - 1:
+                    raise
+                delay = (2 ** attempt) + uniform(0, 0.5)
+                logger.warning(
+                    "Gemini model %s returned a temporary error; retrying in %.1fs (%s/%s): %s",
+                    model,
+                    delay,
+                    attempt + 1,
+                    MODEL_RETRIES - 1,
+                    error,
+                )
+                await asyncio.sleep(delay)
 
     async def analyze_market(
         self,
@@ -142,20 +187,28 @@ class GeminiSMCAnalyzer:
         """
 
         try:
-            # google-genai's generate_content is blocking; run it off the event
-            # loop so the 24/7 trading engine and API requests are not stalled.
-            response = await asyncio.to_thread(
-                lambda: self.client.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        response_mime_type="application/json",
-                        response_schema=SMCTradeSignal,
-                        temperature=0.1,  # Low temperature for deterministic analysis
-                    ),
-                )
-            )
+            models = [self.model_name]
+            if FALLBACK_MODEL and FALLBACK_MODEL not in models:
+                models.append(FALLBACK_MODEL)
+            response = None
+            last_error = None
+            for model in models:
+                try:
+                    response = await self._generate_content(model, prompt, system_instruction)
+                    break
+                except Exception as error:
+                    last_error = error
+                    if not self._is_transient_api_error(error) or model == models[-1]:
+                        raise
+                    logger.warning(
+                        "Gemini model %s is temporarily unavailable; trying fallback model %s: %s",
+                        model,
+                        FALLBACK_MODEL,
+                        error,
+                    )
+
+            if response is None:
+                raise last_error or RuntimeError("Gemini returned no response")
 
             raw_json = response.text
             signal_data = json.loads(raw_json)
