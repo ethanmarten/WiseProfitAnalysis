@@ -14,6 +14,7 @@ import os
 import sys
 import asyncio
 import logging
+import requests
 from datetime import datetime, date, timedelta
 from typing import Dict, Any, List, Optional
 
@@ -69,8 +70,6 @@ MIN_SIGNAL_CONFIDENCE = float(os.getenv("MIN_SIGNAL_CONFIDENCE", "0.70"))
 DEFAULT_LOT_SIZE = float(os.getenv("DEFAULT_LOT_SIZE", "0.02"))
 ENGINE_INTERVAL_SECONDS = int(os.getenv("ENGINE_INTERVAL_SECONDS", "60"))
 PENDING_SIGNAL_TTL_SECONDS = int(os.getenv("PENDING_SIGNAL_TTL_SECONDS", "90"))
-TRADING_MODE = "AUTO"
-
 # Signals are always executed by the local MetaTrader 5 bridge.
 BRIDGE_MODE = True
 
@@ -464,7 +463,7 @@ async def logout_user(request: Request, db: Session = Depends(get_db)):
 @app.get("/api/me")
 async def get_me(user: User = Depends(current_user)):
     """Returns the authenticated user's identity, used by the dashboard on load."""
-    return {"user_id": user.id, "email": user.email}
+    return {"user_id": user.id, "email": user.email, "trading_mode": user.trading_mode or "AUTO"}
 
 
 @app.post("/api/register-account", status_code=status.HTTP_201_CREATED)
@@ -625,11 +624,19 @@ async def list_pending_signals(
 
 
 @app.get("/api/signals")
-async def get_latest_public_signal(db: Session = Depends(get_db)):
-    """Returns the newest unexecuted signal for the local MT5 polling client."""
+async def get_latest_public_signal(
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Returns one approved/automatic signal for the authenticated local bridge."""
+    allowed_statuses = ["PENDING"] if user.trading_mode == "AUTO" else ["APPROVED"]
     row = (
         db.query(PendingSignal)
-        .filter(PendingSignal.status == "PENDING", PendingSignal.expires_at > utcnow())
+        .filter(
+            PendingSignal.user_id == user.id,
+            PendingSignal.status.in_(allowed_statuses),
+            PendingSignal.expires_at > utcnow(),
+        )
         .order_by(PendingSignal.created_at.desc())
         .first()
     )
@@ -640,6 +647,8 @@ async def get_latest_public_signal(db: Session = Depends(get_db)):
     # so a restart or second client cannot execute the same signal twice.
     row.status = "CLAIMED"
     row.claimed_at = utcnow()
+    if not row.claim_token:
+        row.claim_token = _secrets.token_urlsafe(24)
     db.commit()
 
     return {
@@ -650,6 +659,7 @@ async def get_latest_public_signal(db: Session = Depends(get_db)):
             "lots": row.lots,
             "sl": row.stop_loss,
             "tp": row.take_profit,
+            "claim_token": row.claim_token,
             "timestamp": int(row.created_at.timestamp()) if row.created_at else int(utcnow().timestamp()),
         }
     }
@@ -759,7 +769,7 @@ async def approve_manual_signal(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    """Reject server-side execution; the local MT5 bridge executes signals."""
+    """Approve a MANUAL-mode signal and make it available to the local bridge."""
     row = db.query(PendingSignal).filter(
         PendingSignal.id == signal_id,
         PendingSignal.user_id == user.id,
@@ -775,138 +785,39 @@ async def approve_manual_signal(
         db.commit()
         raise HTTPException(status_code=410, detail="Signal expired before approval.")
 
-    raise HTTPException(status_code=409, detail="Signals are executed only by the local MetaTrader 5 bridge.")
-
-
-@app.post("/api/toggle-bot")
-async def toggle_bot(
-    req: ToggleBotRequest,
-    user: User = Depends(current_user),
-    db: Session = Depends(get_db),
-):
-    """Toggle the trading mode between AUTO and MANUAL.
-
-    - enabled=true  -> switch to AUTO mode (engine executes trades directly)
-    - enabled=false -> switch to MANUAL mode (engine produces signals for user approval)
-    """
-    # Update the TRADING_MODE env var effect by storing user preference
-    # We'll use a per-user setting stored in the database
-    user_pref = db.query(User).filter(User.id == user.id).first()
-    
-    if req.enabled:
-        # Switch to AUTO mode
-        TRADING_MODE = "AUTO"
-        user_pref.trading_mode = "AUTO" if hasattr(user_pref, 'trading_mode') else "AUTO"
-        db.commit()
-        update_bot_status(
-            "Mode: AUTO",
-            f"Trading mode switched to AUTO. Engine will execute trades automatically."
-        )
-        return {
-            "success": True,
-            "message": "Trading mode switched to AUTO.",
-            "mode": "AUTO",
-            "bot_enabled": True,
-        }
-    else:
-        # Switch to MANUAL mode
-        TRADING_MODE = "MANUAL"
-        user_pref.trading_mode = "MANUAL" if hasattr(user_pref, 'trading_mode') else "MANUAL"
-        db.commit()
-        update_bot_status(
-            "Mode: MANUAL",
-            f"Trading mode switched to MANUAL. Engine will produce signals for your approval."
-        )
-        return {
-            "success": True,
-            "message": "Trading mode switched to MANUAL.",
-            "mode": "MANUAL",
-            "bot_enabled": False,
-        }
-
-
-@app.post("/api/signals/{signal_id}/approve")
-async def approve_manual_signal(
-    signal_id: int,
-    user: User = Depends(current_user),
-    db: Session = Depends(get_db),
-):
-    """Reject server-side execution; the local MT5 bridge executes signals."""
-    row = db.query(PendingSignal).filter(
-        PendingSignal.id == signal_id,
-        PendingSignal.user_id == user.id,
-    ).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Signal not found.")
-
-    if row.status != "PENDING":
-        raise HTTPException(status_code=409, detail=f"Signal already {row.status.lower()}.")
-
-    if row.expires_at <= utcnow():
-        row.status = "EXPIRED"
-        db.commit()
-        raise HTTPException(status_code=410, detail="Signal expired before approval.")
-
-    raise HTTPException(status_code=409, detail="Signals are executed only by the local MetaTrader 5 bridge.")
-
-
-@app.post("/api/toggle-bot")
-async def toggle_bot(
-    req: ToggleBotRequest,
-    user: User = Depends(current_user),
-    db: Session = Depends(get_db),
-):
-    """Toggle the trading mode between AUTO and MANUAL.
-
-    - enabled=true  -> switch to AUTO mode (engine executes trades directly)
-    - enabled=false -> switch to MANUAL mode (engine produces signals for user approval)
-    """
-    user_pref = db.query(User).filter(User.id == user.id).first()
-
-    if req.enabled:
-        # Switch to AUTO mode
-        user_pref.trading_mode = "AUTO"
-        db.commit()
-        update_bot_status(
-            "Mode: AUTO",
-            f"Trading mode switched to AUTO. Engine will execute trades automatically."
-        )
-        return {
-            "success": True,
-            "message": "Trading mode switched to AUTO.",
-            "mode": "AUTO",
-            "bot_enabled": True,
-        }
-    else:
-        # Switch to MANUAL mode
-        user_pref.trading_mode = "MANUAL"
-        db.commit()
-        update_bot_status(
-            "Mode: MANUAL",
-            f"Trading mode switched to MANUAL. Engine will produce signals for your approval."
-        )
-        return {
-            "success": True,
-            "message": "Trading mode switched to MANUAL.",
-            "mode": "MANUAL",
-            "bot_enabled": False,
-        }
-
-
-@app.post("/api/toggle-bot")
-async def toggle_bot_endpoint(
-    req: ToggleBotRequest,
-    user: User = Depends(current_user),
-    db: Session = Depends(get_db),
-):
-    """Enables or disables automated trading for the authenticated user."""
-    mt5_acc = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
-    if not mt5_acc:
-        raise HTTPException(status_code=404, detail="MT5 account not found")
-
-    mt5_acc.bot_enabled = req.enabled
+    row.status = "APPROVED"
     db.commit()
-    return {"success": True, "user_id": user.id, "bot_enabled": mt5_acc.bot_enabled}
+    db.refresh(row)
+    return {"success": True, "signal": _signal_to_dict(row)}
+
+
+@app.post("/api/toggle-bot")
+async def toggle_bot(
+    req: ToggleBotRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Toggle the trading mode between AUTO and MANUAL (per-user, persisted)."""
+    user_pref = db.query(User).filter(User.id == user.id).first()
+    if not user_pref:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if req.enabled:
+        user_pref.trading_mode = "AUTO"
+        update_bot_status("Mode: AUTO", "Trading mode switched to AUTO. Engine executes trades automatically.")
+    else:
+        user_pref.trading_mode = "MANUAL"
+        update_bot_status("Mode: MANUAL", "Trading mode switched to MANUAL. Engine queues signals for your approval.")
+    mt5_acc = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
+    if mt5_acc:
+        mt5_acc.bot_enabled = True
+    db.commit()
+    return {
+        "success": True,
+        "mode": user_pref.trading_mode,
+        "bot_enabled": bool(mt5_acc and mt5_acc.bot_enabled),
+        "message": f"Trading mode switched to {user_pref.trading_mode}.",
+    }
 
 
 @app.get("/api/trades/{user_id}")
@@ -939,7 +850,6 @@ async def get_trade_history(
 # ---------------------------------------------------------------------------
 # WebSocket Endpoint for Real-time Notifications
 # ---------------------------------------------------------------------------
-@app.websocket("/ws/notifications")
 async def websocket_notifications(websocket: WebSocket, token: str = None):
     """WebSocket endpoint for real-time notifications.
 
@@ -1015,7 +925,6 @@ class ChatMessageResponse(BaseModel):
     timestamp: str
 
 
-@app.post("/api/chat", response_model=ChatMessageResponse)
 async def chat_with_gemini(
     req: ChatMessageRequest,
     user: User = Depends(current_user),
@@ -1350,9 +1259,6 @@ async def handle_chat_message(user_id: int, message: str, websocket: WebSocket):
         })
     finally:
         db.close()
-
-
-import requests
 
 def fetch_live_market_data(symbol: str) -> Dict[str, Any]:
     """Fetches real-time price, 24h high/low, bid, ask, and change % from live market feeds."""
@@ -1837,7 +1743,10 @@ async def run_trading_engine_loop():
                         tp = signal.get("take_profit")
 
                         # --- MANUAL MODE: Wait for user approval/rejection ---
-                        if TRADING_MODE == "MANUAL":
+                        trading_mode = db.query(User.trading_mode).filter(
+                            User.id == user_id
+                        ).scalar() or "AUTO"
+                        if trading_mode == "MANUAL":
                             # Create a pending signal and notify the user for approval
                             entry_for_signal = signal.get("entry_price") or current_price
                             pending = PendingSignal(
@@ -1856,6 +1765,7 @@ async def run_trading_engine_loop():
                                 expires_at=utcnow() + timedelta(seconds=PENDING_SIGNAL_TTL_SECONDS),
                             )
                             db.add(pending)
+                            tracker.daily_setup_count += 1
                             db.commit()
                             db.refresh(pending)
 

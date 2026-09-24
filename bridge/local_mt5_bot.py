@@ -58,6 +58,12 @@ log = logging.getLogger("wp-bridge")
 _session = requests.Session()
 _session.headers.update({"User-Agent": "WiseProfit-Bridge/1.0"})
 last_processed_signal_id = None
+WP_EMAIL = os.getenv("WP_EMAIL", "").strip()
+WP_PASSWORD = os.getenv("WP_PASSWORD", "").strip()
+
+# Read dashboard credentials from environment (set in bridge/.env).
+WP_EMAIL = os.getenv("WP_EMAIL", "").strip()
+WP_PASSWORD = os.getenv("WP_PASSWORD", "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -279,17 +285,24 @@ def run_loop() -> None:
                     log.info("Uploaded fresh %s M1/M5/M15 candles to Render.", MT5_SYMBOL)
                 last_market_sync_time = now
 
-            payload = _session.get(
-                f"{RENDER_URL}/api/signals", timeout=REQUEST_TIMEOUT
-            ).json()
+            payload = _get("/api/signals")
             sig = payload.get("signal")
             if sig:
                 signal_id = str(sig.get("id"))
                 if signal_id != str(last_processed_signal_id):
                     log.info("New signal #%s: %s on %s", signal_id, sig["action"], sig["symbol"])
                     outcome = execute_signal(sig)
-                    if outcome["status"] == "executed":
-                        last_processed_signal_id = signal_id
+                    _post(
+                        f"/api/signals/{signal_id}/ack",
+                        {
+                            "claim_token": sig.get("claim_token", ""),
+                            "status": outcome["status"],
+                            "position_id": outcome.get("position_id"),
+                            "entry_price": outcome.get("entry_price"),
+                            "error": outcome.get("error"),
+                        },
+                    )
+                    last_processed_signal_id = signal_id
                     log.info("Signal #%s result: %s", signal_id, outcome["status"])
 
             consecutive_failures = 0
@@ -329,6 +342,11 @@ def run_loop() -> None:
 
 
 def main() -> None:
+    try:
+        _login()
+    except BridgeError as exc:
+        log.error("Cannot start bridge: %s", exc)
+        sys.exit(1)
     if not initialize_mt5():
         sys.exit(1)
     log.info("Starting poll loop (interval=%.1fs). Press Ctrl+C to stop.", POLL_INTERVAL)

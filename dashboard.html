@@ -156,6 +156,16 @@
     .mode-indicator.manual {
       color: #ffb703;
     }
+    .mode-indicator.auto {
+      color: #00e699;
+    }
+    #modeToggleBtn {
+      transition: opacity 0.2s;
+    }
+    #modeToggleBtn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
 
     .status-dot {
       width: 8px;
@@ -1061,6 +1071,9 @@
         </span>
         <span id="liveStatusTime">Syncing...</span>
         <span style="margin-left: 24px; font-size: 0.85rem; color: var(--text-muted);" id="modeStatusBadge">AUTO</span>
+        <button id="modeToggleBtn" onclick="toggleTradingMode()" style="margin-left:12px; padding:6px 14px; border-radius:6px; border:none; cursor:pointer; font-weight:700; font-size:0.82rem;">
+          <i class="fa-solid fa-shuffle"></i> Switch to MANUAL
+        </button>
       </div>
       <div style="font-size: 1.1rem; font-weight: 700; color: #ffffff;" id="liveStatusStep">
         Initializing Engine...
@@ -1068,6 +1081,13 @@
       <div style="font-size: 0.88rem; color: var(--text-muted); margin-top: 4px;" id="liveStatusDetail">
         Waiting for background trading cycle...
       </div>
+    </div>
+
+    <div class="card" id="pendingSignalsCard" style="margin-top: 24px; display: none;">
+      <div class="card-title">
+        <i class="fa-solid fa-hand-pointer" style="color: var(--primary-accent);"></i> Signals Awaiting Approval
+      </div>
+      <div id="pendingSignalsList"></div>
     </div>
 
     <!-- Executed Trade Log Table -->
@@ -1535,6 +1555,7 @@
         const res = await authFetch(`/api/dashboard/${currentUserId}`);
         if (!res.ok) return;
         const data = await res.json();
+        fetchPendingSignals();
 
         // Update PnL and Cap Progress
         const pnl = data.daily_pnl || 0.0;
@@ -1654,11 +1675,40 @@
       }
     }
 
+    async function fetchPendingSignals() {
+      try {
+        const res = await authFetch('/api/signals/pending');
+        if (!res.ok) return;
+        const data = await res.json();
+        const card = document.getElementById('pendingSignalsCard');
+        const list = document.getElementById('pendingSignalsList');
+        if (!card || !list) return;
+        if (!data.signals || data.signals.length === 0) {
+          card.style.display = 'none';
+          list.innerHTML = '';
+          return;
+        }
+        card.style.display = 'block';
+        list.innerHTML = data.signals.map(signal => `
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:16px; padding:12px 0; border-bottom:1px solid rgba(255,255,255,.08);">
+            <div>
+              <strong>${signal.action} ${signal.symbol}</strong>
+              <span style="color:var(--text-muted); margin-left:10px;">Confidence ${(signal.confidence * 100).toFixed(0)}%</span>
+              <div style="color:var(--text-muted); font-size:.82rem; margin-top:4px;">Entry ${fmtPrice(signal.entry_price)} | SL ${fmtPrice(signal.stop_loss)} | TP ${fmtPrice(signal.take_profit)}</div>
+            </div>
+            <button class="approve-signal-btn" data-signal-id="${signal.id}" style="padding:8px 14px; border:0; border-radius:6px; cursor:pointer; background:var(--primary-accent); color:#07110e; font-weight:700; white-space:nowrap;">Approve</button>
+          </div>
+        `).join('');
+      } catch (err) {
+        console.error('Failed to fetch pending signals:', err);
+      }
+    }
+
     // Modal Control Functions
     function openMT5Modal() { document.getElementById('mt5Modal').style.display = 'flex'; }
     function closeMT5Modal() { document.getElementById('mt5Modal').style.display = 'none'; }
 
-    // Update trading mode badge appearance
+    // Update trading mode badge appearance + sync toggle button
     function updateModeBadge() {
       const mode = localStorage.getItem('trading_mode') || 'AUTO';
       const badge = document.getElementById('modeStatusBadge');
@@ -1666,6 +1716,7 @@
         badge.textContent = mode;
         badge.className = 'mode-indicator ' + mode.toLowerCase();
       }
+      syncModeButton();
     }
 
     async function signOutUser() {
@@ -1731,6 +1782,7 @@
         currentUserId = me.user_id;
         localStorage.setItem('user_id', me.user_id);
         localStorage.setItem('user_email', me.email);
+        localStorage.setItem('trading_mode', me.trading_mode || 'AUTO');
         document.getElementById('userEmailDisplay').innerText = me.email;
         const emailField = document.getElementById('email');
         if (emailField) emailField.value = me.email;
@@ -1771,21 +1823,14 @@
     // Approve a manual signal for execution
     async function approveManualSignal(signalId) {
       try {
-        const res = await fetch(`/api/signals/${signalId}/approve`, {
+        const res = await authFetch(`/api/signals/${signalId}/approve`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
         });
         const data = await res.json();
-
         if (!res.ok) {
           showToast(data.detail || 'Failed to approve signal', 'error');
           return;
         }
-
-        // Reload dashboard to show updated state
         fetchDashboardData();
         showToast('Signal approved and trade executed!', 'success');
       } catch (err) {
@@ -1797,27 +1842,67 @@
     // Reject a manual signal
     async function rejectManualSignal(signalId) {
       try {
-        const res = await fetch(`/api/signals/${signalId}/ack`, {
+        const res = await authFetch(`/api/signals/${signalId}/ack`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${getAuthToken()}`
-          },
           body: JSON.stringify({ status: 'failed' })
         });
         const data = await res.json();
-
         if (!res.ok) {
           showToast('Failed to reject signal', 'error');
           return;
         }
-
-        // Reload dashboard to show updated state
         fetchDashboardData();
         showToast('Signal rejected.', 'warning');
       } catch (err) {
         showToast('Error communicating with server', 'error');
         console.error(err);
+      }
+    }
+
+    // --- Trading Mode Toggle -----------------------------------------
+    async function toggleTradingMode() {
+      const btn = document.getElementById('modeToggleBtn');
+      if (!btn) return;
+      const current = btn.textContent.includes('MANUAL') ? 'MANUAL' : 'AUTO';
+      const targetEnabled = current === 'MANUAL'; // enable AUTO
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Switching...';
+      try {
+        const res = await fetch('/api/toggle-bot', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${getAuthToken()}`
+          },
+          body: JSON.stringify({ enabled: targetEnabled })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Toggle failed');
+        localStorage.setItem('trading_mode', data.mode);
+        updateModeBadge();
+        showToast(`Trading mode: ${data.mode}`, 'success');
+        // Refresh dashboard to reflect new mode
+        fetchDashboardData();
+      } catch (err) {
+        showToast('Failed to switch mode: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // Sync button label with current mode (called on load & after toggle)
+    function syncModeButton() {
+      const mode = localStorage.getItem('trading_mode') || 'AUTO';
+      const btn = document.getElementById('modeToggleBtn');
+      if (!btn) return;
+      if (mode === 'MANUAL') {
+        btn.innerHTML = '<i class="fa-solid fa-shuffle"></i> Switch to AUTO';
+        btn.style.background = 'var(--danger)';
+        btn.style.color = '#fff';
+      } else {
+        btn.innerHTML = '<i class="fa-solid fa-shuffle"></i> Switch to MANUAL';
+        btn.style.background = 'var(--primary-accent)';
+        btn.style.color = '#fff';
       }
     }
 

@@ -17,6 +17,7 @@ env/
 .env
 .env.local
 .env.*.local
+.secret_key
 
 # Local SQLite databases
 *.db
