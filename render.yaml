@@ -31,7 +31,7 @@ services:
       - key: GROQ_MODEL
         value: "llama-3.3-70b-versatile"
       - key: GROQ_FALLBACK_MODEL
-        value: "meta-llama/llama-4-scout-17b-16e-instruct"
+        value: "llama-3.1-8b-instant"
       - key: SECRET_KEY
         generateValue: true   # signs sessions and encrypts stored MT5 credentials
       - key: DATABASE_URL

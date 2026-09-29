@@ -34,13 +34,20 @@ FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 MODEL_RETRIES = max(1, int(os.getenv("GEMINI_MODEL_RETRIES", "2")))
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant")
 
 
 def resolve_gemini_model(model: str) -> str:
     """Replace the unavailable legacy model named by older deployments."""
     legacy_models = {"gemini-2.5-flash", "gemini-3.6-flash"}
     return "gemini-3.8-flash" if model.strip() in legacy_models else model.strip()
+
+
+def resolve_groq_model(model: str) -> str:
+    """Replace retired or inaccessible Groq model names with a supported fallback."""
+    if not model or "llama-4-scout" in model.lower():
+        return "llama-3.1-8b-instant"
+    return model.strip()
 
 # Minimum acceptable risk-to-reward ratio enforced locally, independent of what
 # the model claims in its response.
@@ -116,7 +123,7 @@ class GeminiSMCAnalyzer:
         groq_key = os.getenv("GROQ_API_KEY")
         if not self._is_valid_key(groq_key):
             raise RuntimeError("GROQ_API_KEY is not configured")
-        selected_model = model_name or os.getenv("GROQ_MODEL", GROQ_MODEL)
+        selected_model = resolve_groq_model(model_name or os.getenv("GROQ_MODEL", GROQ_MODEL))
 
         def request_sync() -> Dict[str, Any]:
             response = requests.post(
@@ -308,7 +315,7 @@ class GeminiSMCAnalyzer:
             try:
                 signal_data = await self._analyze_with_groq(prompt, system_instruction)
             except Exception as groq_error:
-                fallback_model = os.getenv("GROQ_FALLBACK_MODEL", GROQ_FALLBACK_MODEL).strip()
+                fallback_model = resolve_groq_model(os.getenv("GROQ_FALLBACK_MODEL", GROQ_FALLBACK_MODEL))
                 if fallback_model and fallback_model != os.getenv("GROQ_MODEL", GROQ_MODEL):
                     logger.warning("Configured Groq model failed; trying fallback %s: %s", fallback_model, groq_error)
                     signal_data = await self._analyze_with_groq(
