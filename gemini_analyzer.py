@@ -27,13 +27,20 @@ logger = logging.getLogger("gemini_analyzer")
 load_dotenv(Path(__file__).with_name(".env"))
 
 # Model is configurable; use the current model recommended by the API response.
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 # Keep the current supported model as the only default. A fallback must be
 # explicitly configured because model availability differs between accounts.
 FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 MODEL_RETRIES = max(1, int(os.getenv("GEMINI_MODEL_RETRIES", "2")))
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+
+
+def resolve_gemini_model(model: str) -> str:
+    """Replace the unavailable legacy model named by older deployments."""
+    legacy_models = {"gemini-2.5-flash", "gemini-3.6-flash"}
+    return "gemini-3.8-flash" if model.strip() in legacy_models else model.strip()
 
 # Minimum acceptable risk-to-reward ratio enforced locally, independent of what
 # the model claims in its response.
@@ -103,11 +110,13 @@ class GeminiSMCAnalyzer:
         self,
         prompt: str,
         system_instruction: str,
+        model_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Uses Groq's OpenAI-compatible API when Gemini is unavailable."""
         groq_key = os.getenv("GROQ_API_KEY")
         if not self._is_valid_key(groq_key):
             raise RuntimeError("GROQ_API_KEY is not configured")
+        selected_model = model_name or os.getenv("GROQ_MODEL", GROQ_MODEL)
 
         def request_sync() -> Dict[str, Any]:
             response = requests.post(
@@ -117,7 +126,7 @@ class GeminiSMCAnalyzer:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": os.getenv("GROQ_MODEL", GROQ_MODEL),
+                    "model": selected_model,
                     "messages": [
                         {"role": "system", "content": system_instruction},
                         {"role": "user", "content": prompt},
@@ -127,7 +136,10 @@ class GeminiSMCAnalyzer:
                 },
                 timeout=45,
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Groq HTTP {response.status_code}: {response.text[:500]}"
+                )
             payload = response.json()
             content = payload["choices"][0]["message"]["content"]
             if isinstance(content, list):
@@ -266,7 +278,7 @@ class GeminiSMCAnalyzer:
             if self.client is None:
                 raise RuntimeError("Gemini client is not configured")
 
-            models = [self.model_name]
+            models = [resolve_gemini_model(self.model_name)]
             if FALLBACK_MODEL and FALLBACK_MODEL not in models:
                 models.append(FALLBACK_MODEL)
             response = None
@@ -293,7 +305,19 @@ class GeminiSMCAnalyzer:
             if not self._is_valid_key(groq_key):
                 raise
             logger.warning("Gemini analysis failed; switching to Groq: %s", gemini_error)
-            signal_data = await self._analyze_with_groq(prompt, system_instruction)
+            try:
+                signal_data = await self._analyze_with_groq(prompt, system_instruction)
+            except Exception as groq_error:
+                fallback_model = os.getenv("GROQ_FALLBACK_MODEL", GROQ_FALLBACK_MODEL).strip()
+                if fallback_model and fallback_model != os.getenv("GROQ_MODEL", GROQ_MODEL):
+                    logger.warning("Configured Groq model failed; trying fallback %s: %s", fallback_model, groq_error)
+                    signal_data = await self._analyze_with_groq(
+                        prompt,
+                        system_instruction,
+                        model_name=fallback_model,
+                    )
+                else:
+                    raise
             signal_data["provider"] = "groq"
 
             # Extra sanity check for Gold (XAUUSD) SL/TP boundaries

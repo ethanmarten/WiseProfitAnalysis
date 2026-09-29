@@ -1483,7 +1483,9 @@
           displayAIAnalysisResult(data);
           fetchDashboardData();
         } else {
-          document.getElementById('aiReasoningText').innerText = data.detail || 'Analysis failed. Please try again.';
+          const errorCode = data.error_type ? ` [${data.error_type}]` : '';
+          const errorMessage = data.error_message ? ` ${data.error_message}` : '';
+          document.getElementById('aiReasoningText').innerText = `${data.detail || 'Analysis failed. Please try again.'}${errorCode}${errorMessage}`;
           document.getElementById('analysisOutputCard').style.display = 'block';
         }
       } catch (err) {

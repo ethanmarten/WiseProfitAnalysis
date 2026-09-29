@@ -301,6 +301,7 @@ async def api_exception_handler(request: Request, exc: Exception):
                 "success": False,
                 "detail": "Internal server error while processing the request.",
                 "error_type": type(exc).__name__,
+                "error_message": str(exc)[:300] or "No additional error message.",
             },
         )
     return JSONResponse(status_code=500, content={"detail": "Internal server error."})
