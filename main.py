@@ -613,6 +613,7 @@ def _signal_to_dict(row: PendingSignal) -> Dict[str, Any]:
         "entry_price": row.entry_price,
         "stop_loss": row.stop_loss,
         "take_profit": row.take_profit,
+        "risk_amount": row.risk_amount or 0.0,
         "confidence": row.confidence,
         "reasoning": row.reasoning,
         "setup_type": row.setup_type,
@@ -678,6 +679,7 @@ async def get_latest_public_signal(
             "symbol": row.symbol,
             "action": row.action,
             "lots": row.lots,
+            "risk_amount": row.risk_amount or 0.0,
             "sl": row.stop_loss,
             "tp": row.take_profit,
             "claim_token": row.claim_token,
@@ -1557,6 +1559,11 @@ class AnalyzeSymbolRequest(BaseModel):
     symbol: str = Field(..., json_schema_extra={"example": "XAUUSD"})
 
 
+class ApplyAnalysisRequest(BaseModel):
+    analysis_id: int = Field(..., ge=1)
+    risk_amount: float = Field(..., gt=0, le=100, description="Maximum dollar risk for this trade")
+
+
 @app.post("/api/analyze-symbol")
 async def analyze_symbol_on_demand(
     req: AnalyzeSymbolRequest,
@@ -1634,8 +1641,10 @@ async def analyze_symbol_on_demand(
     )
     db.add(analysis_entry)
     db.commit()
+    db.refresh(analysis_entry)
 
     return {
+        "analysis_id": analysis_entry.id,
         "symbol": symbol,
         "current_price": current_price,
         "action": action,
@@ -1648,6 +1657,64 @@ async def analyze_symbol_on_demand(
         "setup_type": setup_type,
         "reasoning": reasoning,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+
+@app.post("/api/analyze-symbol/apply")
+async def apply_analysis_signal(
+    req: ApplyAnalysisRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Queue a specific on-demand analysis after explicit user agreement."""
+    analysis = db.query(AnalysisLog).filter(
+        AnalysisLog.id == req.analysis_id,
+        AnalysisLog.user_id == user.id,
+    ).first()
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    if analysis.action not in ("BUY", "SELL"):
+        raise HTTPException(status_code=409, detail="This analysis is HOLD and cannot be executed.")
+    if not analysis.entry_price or not analysis.stop_loss or not analysis.take_profit:
+        raise HTTPException(status_code=409, detail="Analysis has no valid entry, stop loss, and take profit.")
+
+    tracker = get_or_create_daily_tracker(db, user.id)
+    if tracker.target_cap_reached or tracker.total_pnl >= DAILY_PROFIT_TARGET:
+        raise HTTPException(status_code=409, detail="Daily profit target reached; trading is locked.")
+    if tracker.daily_setup_count >= MAX_DAILY_SETUPS:
+        raise HTTPException(status_code=409, detail="Daily setup limit reached.")
+
+    account = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
+    if not account or not account.bot_enabled:
+        raise HTTPException(status_code=409, detail="Connect the local MT5 bridge before agreeing to a trade.")
+
+    status_value = "PENDING" if (user.trading_mode or "AUTO") == "AUTO" else "APPROVED"
+    pending = PendingSignal(
+        user_id=user.id,
+        symbol=analysis.symbol,
+        action=analysis.action,
+        lots=DEFAULT_LOT_SIZE,
+        entry_price=analysis.entry_price,
+        stop_loss=analysis.stop_loss,
+        take_profit=analysis.take_profit,
+        risk_amount=req.risk_amount,
+        confidence=analysis.confidence,
+        reasoning=analysis.reasoning,
+        setup_type=analysis.setup_type,
+        risk_reward_ratio=analysis.risk_reward_ratio,
+        status=status_value,
+        expires_at=utcnow() + timedelta(seconds=PENDING_SIGNAL_TTL_SECONDS),
+    )
+    db.add(pending)
+    tracker.daily_setup_count += 1
+    db.commit()
+    db.refresh(pending)
+    return {
+        "success": True,
+        "message": f"{analysis.action} signal queued for local MT5 execution.",
+        "signal_id": pending.id,
+        "status": pending.status,
+        "risk_amount": req.risk_amount,
     }
 
 

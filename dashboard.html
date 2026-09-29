@@ -1005,6 +1005,18 @@
           <div class="reasoning-box" id="aiReasoningText">
             The analysis will use the latest candles and quote from the local MT5 terminal.
           </div>
+
+          <div id="analysisApprovalControls" style="display:none; margin-top:16px; padding:14px; border:1px solid rgba(0,230,153,.22); border-radius:10px; background:rgba(7,16,24,.7);">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+              <label for="riskAmountInput" style="color:var(--text-muted);">Risk amount (USD, max $100)</label>
+              <input id="riskAmountInput" type="number" min="0.01" max="100" step="0.01" value="10" style="width:120px; padding:9px 10px; border-radius:7px; border:1px solid rgba(0,230,153,.35); background:#0b1720; color:#fff;">
+              <div style="display:flex; gap:8px;">
+                <button id="agreeAnalysisBtn" type="button" style="padding:9px 16px; border:0; border-radius:7px; cursor:pointer; background:var(--primary-accent); color:#06110d; font-weight:800;">Agree</button>
+                <button id="refuseAnalysisBtn" type="button" style="padding:9px 16px; border:1px solid rgba(255,77,77,.7); border-radius:7px; cursor:pointer; background:transparent; color:#ff6b6b; font-weight:800;">Refuse</button>
+              </div>
+            </div>
+            <div id="analysisApprovalStatus" style="margin-top:9px; color:var(--text-muted); font-size:.82rem;">No order will be sent until you press Agree.</div>
+          </div>
         </div>
 
       </div>
@@ -1157,6 +1169,7 @@
     let currentUserId = null;
     let currentSymbol = "XAUUSD";
     let currentTimeframe = "5";
+    let currentAnalysisId = null;
     let tvWidget = null;
     let recentAnalyses = [];
     let hasLoadedInitialAnalysis = false;
@@ -1595,10 +1608,55 @@
       }
     }
 
+    async function agreeToAnalysis() {
+      const riskInput = document.getElementById('riskAmountInput');
+      const status = document.getElementById('analysisApprovalStatus');
+      const riskAmount = Number(riskInput.value);
+      if (!currentAnalysisId || !Number.isFinite(riskAmount) || riskAmount <= 0 || riskAmount > 100) {
+        status.innerText = 'Enter a risk amount between $0.01 and $100.';
+        return;
+      }
+      const button = document.getElementById('agreeAnalysisBtn');
+      button.disabled = true;
+      status.innerText = 'Submitting the agreed signal to the local MT5 bridge...';
+      try {
+        const res = await authFetch('/api/analyze-symbol/apply', {
+          method: 'POST',
+          body: JSON.stringify({ analysis_id: currentAnalysisId, risk_amount: riskAmount })
+        });
+        const data = await readApiResponse(res);
+        if (!res.ok) {
+          status.innerText = data.detail || 'The signal was not queued.';
+          return;
+        }
+        status.innerText = `Agreed. Signal #${data.signal_id} is queued for local MT5 execution with $${riskAmount.toFixed(2)} maximum risk.`;
+        document.getElementById('refuseAnalysisBtn').disabled = true;
+        fetchPendingSignals();
+      } catch (error) {
+        status.innerText = `Could not queue signal: ${error.message}`;
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function refuseAnalysis() {
+      currentAnalysisId = null;
+      document.getElementById('analysisApprovalControls').style.display = 'none';
+      document.getElementById('aiReasoningText').innerText = 'Trade refused. No order was sent to MT5.';
+    }
+
     // Render Gemini Analysis Result Card
     function displayAIAnalysisResult(data) {
       const card = document.getElementById('analysisOutputCard');
       card.style.display = 'block';
+      currentAnalysisId = data.analysis_id || null;
+      const approvalControls = document.getElementById('analysisApprovalControls');
+      const approvalStatus = document.getElementById('analysisApprovalStatus');
+      const canApply = currentAnalysisId && (data.action === 'BUY' || data.action === 'SELL');
+      approvalControls.style.display = canApply ? 'block' : 'none';
+      approvalStatus.innerText = canApply ? 'No order will be sent until you press Agree.' : '';
+      document.getElementById('agreeAnalysisBtn').disabled = false;
+      document.getElementById('refuseAnalysisBtn').disabled = false;
 
       const badge = document.getElementById('aiActionBadge');
       badge.innerText = data.action;
@@ -1879,6 +1937,9 @@
         alert('Failed to connect to server: ' + err.message);
       }
     });
+
+    document.getElementById('agreeAnalysisBtn').addEventListener('click', agreeToAnalysis);
+    document.getElementById('refuseAnalysisBtn').addEventListener('click', refuseAnalysis);
 
     // Real-Time Live Market Polling
     // Throttled to 3000ms (was 2500ms) to reduce CPU load on Render while

@@ -27,7 +27,7 @@ logger = logging.getLogger("gemini_analyzer")
 load_dotenv(Path(__file__).with_name(".env"))
 
 # Model is configurable; use the current model recommended by the API response.
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "Gemini 3.7 Flash")
 # Keep the current supported model as the only default. A fallback must be
 # explicitly configured because model availability differs between accounts.
 FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()

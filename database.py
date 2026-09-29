@@ -179,6 +179,7 @@ class PendingSignal(Base):
     entry_price = Column(Float, nullable=False)
     stop_loss = Column(Float, nullable=True)
     take_profit = Column(Float, nullable=True)
+    risk_amount = Column(Float, nullable=True, default=0.0)
     confidence = Column(Float, default=0.0)
     reasoning = Column(Text, nullable=True)
     setup_type = Column(String(100), nullable=True)
@@ -246,6 +247,12 @@ def _run_lightweight_migrations() -> None:
     # indexes that the production CREATE TABLE may have skipped.
     if "pending_signals" not in inspector.get_table_names():
         return  # Table will be created by create_all() on the next call.
+
+    existing_signal_columns = {col["name"] for col in inspector.get_columns("pending_signals")}
+    if "risk_amount" not in existing_signal_columns:
+        logger.info("Migrating: adding pending_signals.risk_amount column.")
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE pending_signals ADD COLUMN risk_amount FLOAT DEFAULT 0"))
 
     sig_indexes = {ix["name"] for ix in inspector.get_indexes("pending_signals")}
     with engine.begin() as conn:

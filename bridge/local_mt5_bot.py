@@ -58,8 +58,8 @@ _session = requests.Session()
 _session.headers.update({"User-Agent": "WiseProfit-Bridge/1.0"})
 last_processed_signal_id = None
 # Credentials must come from bridge/.env or the process environment.
-WP_EMAIL = os.getenv("WP_EMAIL", "ehabalhayekm@gmail.com").strip()
-WP_PASSWORD = os.getenv("WP_PASSWORD", "Ehab4820775+").strip()
+WP_EMAIL = os.getenv("WP_EMAIL", "").strip()
+WP_PASSWORD = os.getenv("WP_PASSWORD", "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +232,7 @@ def execute_signal(signal: Dict[str, Any]) -> Dict[str, Any]:
     symbol = signal.get("symbol", MT5_SYMBOL).upper()
     action = signal.get("action", "").upper()
     lots = float(signal.get("lots", 0.01))
+    risk_amount = float(signal.get("risk_amount", 0.0) or 0.0)
     sl = signal.get("sl", signal.get("stop_loss"))
     tp = signal.get("tp", signal.get("take_profit"))
 
@@ -247,6 +248,14 @@ def execute_signal(signal: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "failed", "error": f"No live tick for {symbol}"}
 
     price = tick.ask if action == "BUY" else tick.bid
+
+    # Convert the agreed dollar risk into broker volume when possible.
+    if risk_amount > 0 and sl:
+        tick_size = float(getattr(info, "trade_tick_size", 0.0) or 0.0)
+        tick_value = float(getattr(info, "trade_tick_value", 0.0) or 0.0)
+        stop_distance = abs(price - float(sl))
+        if tick_size > 0 and tick_value > 0 and stop_distance > 0:
+            lots = risk_amount / ((stop_distance / tick_size) * tick_value)
 
     # Normalize lots to the symbol's volume step and bounds so the broker
     # doesn't reject with "invalid price/volume".
