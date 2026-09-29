@@ -83,7 +83,14 @@ class GeminiSMCAnalyzer:
     def _is_valid_key(key: Optional[str]) -> bool:
         if not key:
             return False
-        invalid_placeholders = {"your_api_key", "change_me", "xxx"}
+        invalid_placeholders = {
+            "your_api_key",
+            "your_api_key_here",
+            "your_gemini_api_key_here",
+            "your_groq_api_key_here",
+            "change_me",
+            "xxx",
+        }
         return key.strip().lower() not in invalid_placeholders
 
     async def _analyze_with_groq(
@@ -199,6 +206,7 @@ class GeminiSMCAnalyzer:
             return {
                 "action": "HOLD",
                 "confidence": 0.0,
+                "provider": "none",
                 "reasoning": "No valid GEMINI_API_KEY or GROQ_API_KEY is configured."
             }
 
@@ -206,6 +214,7 @@ class GeminiSMCAnalyzer:
             return {
                 "action": "HOLD",
                 "confidence": 0.0,
+                "provider": "none",
                 "reasoning": "No candle data available for analysis; refusing to trade blind.",
             }
 
@@ -275,6 +284,7 @@ class GeminiSMCAnalyzer:
 
             signal_data = json.loads(response.text)
             signal_data.setdefault("reasoning", "")
+            signal_data["provider"] = "gemini"
 
         except Exception as gemini_error:
             groq_key = os.getenv("GROQ_API_KEY")
@@ -282,6 +292,7 @@ class GeminiSMCAnalyzer:
                 raise
             logger.warning("Gemini analysis failed; switching to Groq: %s", gemini_error)
             signal_data = await self._analyze_with_groq(prompt, system_instruction)
+            signal_data["provider"] = "groq"
 
             # Extra sanity check for Gold (XAUUSD) SL/TP boundaries
             action = signal_data.get("action", "HOLD").upper()
@@ -320,5 +331,6 @@ class GeminiSMCAnalyzer:
             return {
                 "action": "HOLD",
                 "confidence": 0.0,
+                "provider": "error",
                 "reasoning": f"Gemini API Analysis Error: {str(e)}"
             }

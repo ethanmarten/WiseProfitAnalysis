@@ -138,6 +138,27 @@ def initialize_mt5() -> bool:
     return True
 
 
+def register_local_account() -> None:
+    """Tell the backend which logged-in MT5 terminal will execute signals."""
+    account = mt5.account_info()
+    if account is None:
+        raise BridgeError("MT5 account information is unavailable")
+    response = _post(
+        "/api/register-account",
+        {
+            "login": str(account.login),
+            "server": str(account.server),
+            "platform": "mt5",
+        },
+    )
+    log.info(
+        "Local MT5 account registered (login=%s, server=%s, bot_enabled=%s).",
+        account.login,
+        account.server,
+        response.get("bot_enabled"),
+    )
+
+
 def send_market_data(symbol: str = "XAUUSD") -> bool:
     """Upload local M1/M5/M15 candles so Render can run Gemini analysis."""
     if not mt5.symbol_select(symbol, True):
@@ -358,6 +379,12 @@ def main() -> None:
         log.error("Cannot start bridge: %s", exc)
         sys.exit(1)
     if not initialize_mt5():
+        sys.exit(1)
+    try:
+        register_local_account()
+    except BridgeError as exc:
+        log.error("Cannot register local MT5 account: %s", exc)
+        mt5.shutdown()
         sys.exit(1)
     log.info("Starting poll loop (interval=%.1fs). Press Ctrl+C to stop.", POLL_INTERVAL)
     try:

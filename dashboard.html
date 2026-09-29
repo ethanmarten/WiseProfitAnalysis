@@ -1470,10 +1470,13 @@
           displayAIAnalysisResult(data);
           fetchDashboardData();
         } else {
-          alert(data.detail || 'Analysis failed. Please try again.');
+          document.getElementById('aiReasoningText').innerText = data.detail || 'Analysis failed. Please try again.';
+          document.getElementById('analysisOutputCard').style.display = 'block';
         }
       } catch (err) {
         console.error('Error analyzing symbol:', err);
+        document.getElementById('aiReasoningText').innerText = 'Analysis request failed. Check the server and API keys.';
+        document.getElementById('analysisOutputCard').style.display = 'block';
       } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> Analyze';
@@ -1489,15 +1492,19 @@
       badge.innerText = data.action;
       if (data.action === 'BUY') {
         badge.className = 'signal-badge signal-buy';
-      } else {
+      } else if (data.action === 'SELL') {
         badge.className = 'signal-badge signal-sell';
+      } else {
+        badge.className = 'signal-badge';
+        badge.style.color = 'var(--warning)';
+        badge.style.borderColor = 'var(--warning)';
       }
 
       const p = data.entry_price || data.current_price;
       const dec = p > 10 ? 2 : 4;
 
       document.getElementById('aiSetupTitle').innerText = data.setup_type || 'SMC/ICT Analysis';
-      document.getElementById('aiConfidenceText').innerText = `Confidence: ${(data.confidence * 100).toFixed(0)}%`;
+      document.getElementById('aiConfidenceText').innerText = `${(data.provider || 'AI').toUpperCase()} | Confidence: ${(data.confidence * 100).toFixed(0)}%`;
       document.getElementById('aiEntryVal').innerText = `$${p.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec })}`;
       document.getElementById('aiSlVal').innerText = `$${(data.stop_loss || 0).toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec })}`;
       document.getElementById('aiTpVal').innerText = `$${(data.take_profit || 0).toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec })}`;
@@ -1574,7 +1581,9 @@
         if (data.live_status) {
           document.getElementById('liveStatusStep').innerText = data.live_status.step || 'Active';
           document.getElementById('liveStatusDetail').innerText = data.live_status.detail || '';
-          document.getElementById('liveStatusTime').innerText = `Updated: ${data.live_status.updated_at || ''}`;
+          const nextRun = data.live_status.next_run_at ? ` | Next: ${data.live_status.next_run_at}` : '';
+          const provider = data.live_status.provider ? ` | AI: ${data.live_status.provider.toUpperCase()}` : '';
+          document.getElementById('liveStatusTime').innerText = `Updated: ${data.live_status.updated_at || ''}${nextRun}${provider}`;
         }
 
         // Setup Counter
@@ -1645,15 +1654,17 @@
           container.style.display = 'grid';
 
           container.innerHTML = recentAnalyses.map((a, idx) => {
-            const dec = a.entry_price > 10 ? 2 : 4;
+            const displayPrice = a.entry_price || a.current_price || 0;
+            const dec = displayPrice > 10 ? 2 : 4;
+            const actionClass = a.action === 'BUY' ? 'signal-buy' : (a.action === 'SELL' ? 'signal-sell' : 'signal-badge');
             return `
             <div class="recent-card" onclick="viewRecentAnalysisDetail(${idx})">
               <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
                 <span style="font-family:'Outfit'; font-size:1.1rem; font-weight:700; color:#fff;">${a.symbol}</span>
-                <span class="signal-badge ${a.action === 'BUY' ? 'signal-buy' : 'signal-sell'}" style="font-size:0.75rem; padding:3px 10px;">${a.action}</span>
+                <span class="signal-badge ${actionClass}" style="font-size:0.75rem; padding:3px 10px;">${a.action}</span>
               </div>
               <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:8px;">
-                Entry: <strong style="color:#fff;">$${a.entry_price.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec })}</strong> | RRR: <strong style="color:var(--primary-accent);">1:${a.risk_reward_ratio}</strong>
+                Price: <strong style="color:#fff;">$${displayPrice.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec })}</strong> | RRR: <strong style="color:var(--primary-accent);">${a.risk_reward_ratio ? `1:${a.risk_reward_ratio}` : 'n/a'}</strong>
               </div>
               <div style="font-size:0.78rem; color:#6b7280; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
                 ${a.setup_type}

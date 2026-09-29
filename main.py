@@ -95,7 +95,9 @@ LOCAL_MARKET_DATA_MAX_AGE_SECONDS = int(os.getenv("LOCAL_MARKET_DATA_MAX_AGE_SEC
 BOT_LIVE_STATUS = {
     "step": "Initializing",
     "detail": "Background Gemini AI SaaS Trading Engine ready.",
-    "updated_at": datetime.now().strftime("%H:%M:%S")
+    "updated_at": datetime.now().strftime("%H:%M:%S"),
+    "next_run_at": None,
+    "provider": None,
 }
 
 # ---------------------------------------------------------------------------
@@ -226,12 +228,14 @@ async def notify_error(user_id: int, error_message: str):
     await notify_user(user_id, notification)
 
 
-def update_bot_status(step: str, detail: str):
+def update_bot_status(step: str, detail: str, provider: Optional[str] = None):
     global BOT_LIVE_STATUS
     BOT_LIVE_STATUS = {
         "step": step,
         "detail": detail,
-        "updated_at": datetime.now().strftime("%H:%M:%S")
+        "updated_at": datetime.now().strftime("%H:%M:%S"),
+        "next_run_at": BOT_LIVE_STATUS.get("next_run_at"),
+        "provider": provider or BOT_LIVE_STATUS.get("provider"),
     }
     logger.info(f"Bot Activity Update [{step}]: {detail}")
 
@@ -1564,6 +1568,7 @@ async def analyze_symbol_on_demand(
         "symbol": symbol,
         "current_price": current_price,
         "action": action,
+        "provider": signal.get("provider", "unknown"),
         "confidence": confidence,
         "entry_price": entry_price if action in ["BUY", "SELL"] else current_price,
         "stop_loss": stop_loss,
@@ -1608,9 +1613,11 @@ async def run_trading_engine_loop():
 
                 # Fetch all active MT5 accounts with bot enabled
                 accounts = db.query(MT5Account).filter(MT5Account.bot_enabled == True).all()
+                cycle_detail = ""
 
                 if not accounts:
-                    update_bot_status("Standby", "No active MT5 accounts connected. Waiting for setup...")
+                    cycle_detail = "No active MT5 account is registered. Start the local bridge to connect MT5 and begin AI analysis."
+                    update_bot_status("Waiting for MT5 Bridge", cycle_detail)
 
                 for mt5_acc in accounts:
                     user_id = mt5_acc.user_id
@@ -1699,36 +1706,44 @@ async def run_trading_engine_loop():
                     action = signal.get("action", "HOLD").upper()
                     confidence = float(signal.get("confidence", 0.0) or 0.0)
 
-                    # Persist BUY/SELL analyses for the dashboard audit trail.
-                    if action in ["BUY", "SELL"]:
-                        analysis_entry = AnalysisLog(
-                            user_id=user_id,
-                            symbol="XAUUSD",
-                            action=action,
-                            confidence=confidence,
-                            entry_price=signal.get("entry_price") or current_price,
-                            stop_loss=signal.get("stop_loss"),
-                            take_profit=signal.get("take_profit"),
-                            risk_reward_ratio=signal.get("risk_reward_ratio"),
-                            setup_type=signal.get("setup_type", "SMC/ICT Institutional Setup"),
-                            reasoning=signal.get("reasoning", ""),
-                            current_price=current_price
-                        )
-                        db.add(analysis_entry)
-                        db.commit()
-                        
-                        # Notify new signal to connected clients
-                        await notify_signal_generated(user_id, {
-                            "symbol": "XAUUSD",
-                            "action": action,
-                            "confidence": confidence,
-                            "entry_price": signal.get("entry_price"),
-                            "stop_loss": signal.get("stop_loss"),
-                            "take_profit": signal.get("take_profit"),
-                            "risk_reward_ratio": signal.get("risk_reward_ratio"),
-                            "setup_type": signal.get("setup_type"),
-                            "reasoning": signal.get("reasoning", ""),
-                        })
+                    provider = signal.get("provider", "unknown")
+                    reasoning = signal.get("reasoning", "")
+                    update_bot_status(
+                        "Analysis Result: " + action,
+                        f"User {user_id}: {provider.upper()} returned {action} at {confidence*100:.0f}% confidence. {reasoning}",
+                        provider=provider,
+                    )
+
+                    # Persist every analysis, including HOLD, so the dashboard
+                    # proves what the engine evaluated and why it did not trade.
+                    analysis_entry = AnalysisLog(
+                        user_id=user_id,
+                        symbol="XAUUSD",
+                        action=action,
+                        confidence=confidence,
+                        entry_price=signal.get("entry_price") if action in ["BUY", "SELL"] else None,
+                        stop_loss=signal.get("stop_loss"),
+                        take_profit=signal.get("take_profit"),
+                        risk_reward_ratio=signal.get("risk_reward_ratio"),
+                        setup_type=signal.get("setup_type") or ("No High-Probability Setup" if action == "HOLD" else "SMC/ICT Institutional Setup"),
+                        reasoning=reasoning,
+                        current_price=current_price
+                    )
+                    db.add(analysis_entry)
+                    db.commit()
+
+                    await notify_signal_generated(user_id, {
+                        "symbol": "XAUUSD",
+                        "action": action,
+                        "confidence": confidence,
+                        "provider": provider,
+                        "entry_price": signal.get("entry_price"),
+                        "stop_loss": signal.get("stop_loss"),
+                        "take_profit": signal.get("take_profit"),
+                        "risk_reward_ratio": signal.get("risk_reward_ratio"),
+                        "setup_type": signal.get("setup_type"),
+                        "reasoning": reasoning,
+                    })
 
                     # Execute only on a high-confidence directional signal.
                     if action in ["BUY", "SELL"] and confidence >= MIN_SIGNAL_CONFIDENCE:
@@ -1861,9 +1876,11 @@ async def run_trading_engine_loop():
             # Notify error to all connected users
             await notify_error(0, f"خطأ في المحرك: {str(e)}")
 
+        next_run = datetime.now() + timedelta(seconds=ENGINE_INTERVAL_SECONDS)
+        BOT_LIVE_STATUS["next_run_at"] = next_run.strftime("%Y-%m-%d %H:%M:%S")
         update_bot_status(
             "Waiting Cycle",
-            f"Scan cycle complete. Waiting {ENGINE_INTERVAL_SECONDS}s for the next market scan..."
+            cycle_detail or f"Scan cycle complete. Next analysis at {BOT_LIVE_STATUS['next_run_at']} ({ENGINE_INTERVAL_SECONDS}s)."
         )
         await asyncio.sleep(ENGINE_INTERVAL_SECONDS)
 
