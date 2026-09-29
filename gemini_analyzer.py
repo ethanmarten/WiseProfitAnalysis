@@ -33,8 +33,10 @@ DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 MODEL_RETRIES = max(1, int(os.getenv("GEMINI_MODEL_RETRIES", "2")))
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant")
+_groq_models_cache: Optional[List[str]] = None
 
 
 def resolve_gemini_model(model: str) -> str:
@@ -48,6 +50,38 @@ def resolve_groq_model(model: str) -> str:
     if not model or "llama-4-scout" in model.lower():
         return "llama-3.1-8b-instant"
     return model.strip()
+
+
+def _list_groq_models_sync(api_key: str) -> List[str]:
+    response = requests.get(
+        GROQ_MODELS_URL,
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=10,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Groq model list HTTP {response.status_code}: {response.text[:300]}")
+    payload = response.json()
+    return [str(item.get("id")) for item in payload.get("data", []) if item.get("id")]
+
+
+async def get_available_groq_model(api_key: str, preferred: List[str]) -> str:
+    """Select a text-generation model exposed to this exact Groq API key."""
+    global _groq_models_cache
+    if _groq_models_cache is None:
+        _groq_models_cache = await asyncio.to_thread(_list_groq_models_sync, api_key)
+
+    available = set(_groq_models_cache)
+    for model in preferred:
+        resolved = resolve_groq_model(model)
+        if resolved in available:
+            return resolved
+
+    # Avoid embedding a provider model name: choose from the account's list.
+    excluded = ("whisper", "distil-whisper", "guard", "safeguard", "tts", "audio", "compound")
+    text_models = [model for model in _groq_models_cache if not any(part in model.lower() for part in excluded)]
+    if text_models:
+        return text_models[0]
+    raise RuntimeError("Groq API key has no accessible text-generation model")
 
 # Minimum acceptable risk-to-reward ratio enforced locally, independent of what
 # the model claims in its response.
@@ -123,7 +157,11 @@ class GeminiSMCAnalyzer:
         groq_key = os.getenv("GROQ_API_KEY")
         if not self._is_valid_key(groq_key):
             raise RuntimeError("GROQ_API_KEY is not configured")
-        selected_model = resolve_groq_model(model_name or os.getenv("GROQ_MODEL", GROQ_MODEL))
+        configured_model = model_name or os.getenv("GROQ_MODEL", GROQ_MODEL)
+        selected_model = await get_available_groq_model(
+            groq_key,
+            [configured_model, os.getenv("GROQ_FALLBACK_MODEL", GROQ_FALLBACK_MODEL)],
+        )
 
         def request_sync() -> Dict[str, Any]:
             response = requests.post(
@@ -310,7 +348,12 @@ class GeminiSMCAnalyzer:
         except Exception as gemini_error:
             groq_key = os.getenv("GROQ_API_KEY")
             if not self._is_valid_key(groq_key):
-                raise
+                return {
+                    "action": "HOLD",
+                    "confidence": 0.0,
+                    "provider": "error",
+                    "reasoning": f"Gemini unavailable and GROQ_API_KEY is not configured: {gemini_error}",
+                }
             logger.warning("Gemini analysis failed; switching to Groq: %s", gemini_error)
             try:
                 signal_data = await self._analyze_with_groq(prompt, system_instruction)
@@ -318,13 +361,28 @@ class GeminiSMCAnalyzer:
                 fallback_model = resolve_groq_model(os.getenv("GROQ_FALLBACK_MODEL", GROQ_FALLBACK_MODEL))
                 if fallback_model and fallback_model != os.getenv("GROQ_MODEL", GROQ_MODEL):
                     logger.warning("Configured Groq model failed; trying fallback %s: %s", fallback_model, groq_error)
-                    signal_data = await self._analyze_with_groq(
-                        prompt,
-                        system_instruction,
-                        model_name=fallback_model,
-                    )
+                    try:
+                        signal_data = await self._analyze_with_groq(
+                            prompt,
+                            system_instruction,
+                            model_name=fallback_model,
+                        )
+                    except Exception as fallback_error:
+                        logger.error("All AI providers failed: %s", fallback_error, exc_info=True)
+                        return {
+                            "action": "HOLD",
+                            "confidence": 0.0,
+                            "provider": "error",
+                            "reasoning": f"Gemini and Groq are temporarily unavailable. No trade was opened. {fallback_error}",
+                        }
                 else:
-                    raise
+                    logger.error("Groq analysis failed: %s", groq_error, exc_info=True)
+                    return {
+                        "action": "HOLD",
+                        "confidence": 0.0,
+                        "provider": "error",
+                        "reasoning": f"Groq is unavailable. No trade was opened. {groq_error}",
+                    }
             signal_data["provider"] = "groq"
 
             # Extra sanity check for Gold (XAUUSD) SL/TP boundaries
