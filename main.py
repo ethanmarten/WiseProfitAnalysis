@@ -1478,9 +1478,19 @@ async def receive_local_market_data(request: Request):
         if any(len(normalized[key]) < 3 for key in ("M1", "M5", "M15")):
             raise ValueError("M1, M5, and M15 each need at least 3 candles")
 
+        quote_payload = payload.get("quote") or {}
+        quote = {
+            "bid": float(quote_payload.get("bid", 0)),
+            "ask": float(quote_payload.get("ask", 0)),
+            "last": float(quote_payload.get("last", 0)),
+        }
+        if quote["bid"] <= 0 or quote["ask"] <= 0:
+            raise ValueError("MT5 bid and ask are required")
+
         LOCAL_MARKET_DATA[symbol] = {
             "received_at": datetime.now().timestamp(),
             "timeframes": normalized,
+            "quote": quote,
         }
         return {
             "success": True,
@@ -1494,6 +1504,28 @@ async def receive_local_market_data(request: Request):
 @app.get("/api/market-data/{symbol}")
 async def get_market_data(symbol: str):
     """Returns live 24h market stats (real-time price, bid, ask, high, low, change)."""
+    local_data = get_recent_local_market_data(symbol)
+    if local_data:
+        quote = local_data["quote"]
+        candles = local_data["timeframes"]["M5"]
+        current = quote["last"] or ((quote["bid"] + quote["ask"]) / 2)
+        return {
+            "symbol": symbol.upper().strip(),
+            "price": current,
+            "bid": quote["bid"],
+            "ask": quote["ask"],
+            "high": max(float(c["high"]) for c in candles),
+            "low": min(float(c["low"]) for c in candles),
+            "change_percent": 0.0,
+            "source": "MT5_LOCAL",
+            "received_at": local_data["received_at"],
+            "timeframes": local_data["timeframes"],
+        }
+    if symbol.upper().strip() in {"XAUUSD", "GOLD"}:
+        raise HTTPException(
+            status_code=503,
+            detail="Waiting for local MT5 quote. Start the bridge before reading XAUUSD prices.",
+        )
     return fetch_live_market_data(symbol)
 
 
@@ -1501,6 +1533,23 @@ async def get_market_data(symbol: str):
 async def get_candle_close(symbol: str):
     """Returns the latest closed-candle close price from Binance klines.
     Used to synchronize the dashboard header price with the TradingView candle feed."""
+    local_data = get_recent_local_market_data(symbol)
+    if local_data:
+        candle = local_data["timeframes"]["M1"][-1]
+        return {
+            "symbol": symbol.upper().strip(),
+            "close": candle["close"],
+            "open": candle["open"],
+            "high": candle["high"],
+            "low": candle["low"],
+            "change_percent": 0.0,
+            "source": "MT5_LOCAL",
+        }
+    if symbol.upper().strip() in {"XAUUSD", "GOLD"}:
+        raise HTTPException(
+            status_code=503,
+            detail="Waiting for local MT5 candle. Start the bridge before reading XAUUSD prices.",
+        )
     return fetch_latest_candle_close(symbol)
 
 
@@ -1532,6 +1581,11 @@ async def analyze_symbol_on_demand(
     m1_candles, m5_candles, m15_candles = [], [], []
 
     local_data = get_recent_local_market_data(symbol)
+    if symbol in {"XAUUSD", "GOLD"} and not local_data:
+        raise HTTPException(
+            status_code=503,
+            detail="XAUUSD analysis requires fresh candles from the local MT5 bridge.",
+        )
     if local_data:
         m1_candles = local_data["timeframes"]["M1"]
         m5_candles = local_data["timeframes"]["M5"]

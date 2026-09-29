@@ -926,17 +926,18 @@
           <div class="market-symbol-info">
             <div class="market-symbol-name" id="currentSymbolTitle">XAUUSD</div>
             <div class="live-price-tag" id="livePriceDisplay">
-              <span id="priceVal">$2,648.50</span>
+              <span id="priceVal">--</span>
               <span id="priceTickIcon" style="font-size: 0.9rem;"><i class="fa-solid fa-caret-up"></i></span>
             </div>
           </div>
 
           <div class="market-stats-row">
-            <span>24h Change: <strong id="statChange" class="price-up">+1.42%</strong></span>
-            <span>Bid: <strong id="statBid">$2,648.40</strong></span>
-            <span>Ask: <strong id="statAsk">$2,648.60</strong></span>
-            <span>24h High: <strong id="statHigh">$2,655.10</strong></span>
-            <span>24h Low: <strong id="statLow">$2,632.00</strong></span>
+            <span id="marketSourceLabel" style="color: var(--warning); font-weight: 700;">SOURCE: WAITING FOR MT5</span>
+            <span>24h Change: <strong id="statChange" class="price-up">--</strong></span>
+            <span>Bid: <strong id="statBid">--</strong></span>
+            <span>Ask: <strong id="statAsk">--</strong></span>
+            <span>24h High: <strong id="statHigh">--</strong></span>
+            <span>24h Low: <strong id="statLow">--</strong></span>
           </div>
 
           <div class="tf-selector">
@@ -949,7 +950,7 @@
           </div>
         </div>
 
-        <!-- Live TradingView Chart Widget with Trade Visualizer Overlay -->
+        <!-- Local MT5 chart with Trade Visualizer Overlay -->
         <div class="chart-container" id="tv_chart_container">
           <!-- Trade Visualizer Overlay (EP/SL/TP horizontal markers) -->
           <div class="trade-visualizer" id="tradeVisualizer">
@@ -976,8 +977,8 @@
         <div class="analysis-output-card" id="analysisOutputCard">
           <div class="analysis-header">
             <div>
-              <span class="signal-badge signal-buy" id="aiActionBadge">BUY</span>
-              <span style="margin-left: 12px; font-weight: 700; color: #ffffff; font-size: 1.1rem;" id="aiSetupTitle">Bullish FVG + Liquidity Sweep</span>
+              <span class="signal-badge" id="aiActionBadge">WAITING</span>
+              <span style="margin-left: 12px; font-weight: 700; color: #ffffff; font-size: 1.1rem;" id="aiSetupTitle">Waiting for MT5 analysis</span>
             </div>
             <span style="color: var(--text-muted); font-size: 0.85rem;" id="aiConfidenceText">Confidence: 88%</span>
           </div>
@@ -985,24 +986,24 @@
           <div class="metrics-grid-3">
             <div class="metric-box">
               <div class="metric-box-label">Calculated Entry</div>
-              <div class="metric-box-val" id="aiEntryVal">$2,648.50</div>
+              <div class="metric-box-val" id="aiEntryVal">--</div>
             </div>
             <div class="metric-box">
               <div class="metric-box-label">Stop Loss (SL)</div>
-              <div class="metric-box-val" style="color: var(--danger);" id="aiSlVal">$2,640.50</div>
+              <div class="metric-box-val" style="color: var(--danger);" id="aiSlVal">--</div>
             </div>
             <div class="metric-box">
               <div class="metric-box-label">Take Profit (TP)</div>
-              <div class="metric-box-val" style="color: var(--primary-accent);" id="aiTpVal">$2,668.50</div>
+              <div class="metric-box-val" style="color: var(--primary-accent);" id="aiTpVal">--</div>
             </div>
             <div class="metric-box">
               <div class="metric-box-label">Risk-to-Reward</div>
-              <div class="metric-box-val" id="aiRrrVal">1:2.5</div>
+              <div class="metric-box-val" id="aiRrrVal">--</div>
             </div>
           </div>
 
           <div class="reasoning-box" id="aiReasoningText">
-            Gemini 3.6 Flash detected higher timeframe bullish structure shift on XAUUSD. Identified institutional order block with liquidity sweep below swing low.
+            The analysis will use the latest candles and quote from the local MT5 terminal.
           </div>
         </div>
 
@@ -1356,9 +1357,100 @@
       renderTradeVisualizer();
     }
 
-    // Initialize TradingView Live Stream Widget via Direct Embed Iframe (Bypasses Shield/Tracker blocks)
+    async function renderLocalMt5Chart(symbol, interval) {
+      const container = document.getElementById('tv_chart_container');
+      const viz = document.getElementById('tradeVisualizer');
+      container.innerHTML = '';
+
+      const canvas = document.createElement('canvas');
+      canvas.id = 'mt5ChartCanvas';
+      canvas.style.width = '100%';
+      canvas.style.height = '100%';
+      canvas.style.display = 'block';
+      container.appendChild(canvas);
+      if (viz) container.appendChild(viz);
+
+      try {
+        const response = await fetch(`/api/market-data/${encodeURIComponent(symbol)}`);
+        const data = await readApiResponse(response);
+        const timeframe = interval === '1' ? 'M1' : (interval === '15' ? 'M15' : 'M5');
+        const candles = data.timeframes && data.timeframes[timeframe];
+        if (!response.ok || data.source !== 'MT5_LOCAL' || !candles || candles.length < 3) {
+          const context = canvas.getContext('2d');
+          context.fillStyle = '#09131d';
+          context.fillRect(0, 0, canvas.width, canvas.height);
+          context.fillStyle = '#8b9bb4';
+          context.font = '14px Inter, sans-serif';
+          context.fillText('Waiting for local MT5 candles...', 24, 36);
+          return;
+        }
+
+        const rect = container.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.max(640, Math.floor(rect.width * dpr));
+        canvas.height = Math.max(320, Math.floor(rect.height * dpr));
+        const ctx = canvas.getContext('2d');
+        ctx.scale(dpr, dpr);
+        const width = rect.width;
+        const height = rect.height;
+        ctx.fillStyle = '#091018';
+        ctx.fillRect(0, 0, width, height);
+
+        const visible = candles.slice(-50);
+        const values = visible.flatMap(c => [c.high, c.low]);
+        const max = Math.max(...values);
+        const min = Math.min(...values);
+        const range = Math.max(max - min, max * 0.0005);
+        const pad = { top: 28, right: 64, bottom: 34, left: 12 };
+        const chartWidth = width - pad.left - pad.right;
+        const chartHeight = height - pad.top - pad.bottom;
+        const y = price => pad.top + ((max - price) / range) * chartHeight;
+
+        ctx.strokeStyle = 'rgba(139,155,180,.16)';
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 5; i += 1) {
+          const gy = pad.top + (chartHeight * i / 5);
+          ctx.beginPath(); ctx.moveTo(pad.left, gy); ctx.lineTo(width - pad.right, gy); ctx.stroke();
+          ctx.fillStyle = '#8b9bb4'; ctx.font = '11px JetBrains Mono, monospace';
+          ctx.fillText((max - (range * i / 5)).toFixed(2), width - pad.right + 8, gy + 4);
+        }
+
+        const candleWidth = chartWidth / visible.length;
+        visible.forEach((candle, index) => {
+          const x = pad.left + index * candleWidth + candleWidth / 2;
+          const openY = y(candle.open);
+          const closeY = y(candle.close);
+          const highY = y(candle.high);
+          const lowY = y(candle.low);
+          const bullish = candle.close >= candle.open;
+          const color = bullish ? '#00c2a0' : '#ef4352';
+          ctx.strokeStyle = color;
+          ctx.fillStyle = color;
+          ctx.beginPath(); ctx.moveTo(x, highY); ctx.lineTo(x, lowY); ctx.stroke();
+          const bodyTop = Math.min(openY, closeY);
+          const bodyHeight = Math.max(1, Math.abs(closeY - openY));
+          ctx.fillRect(x - Math.max(2, candleWidth * .28), bodyTop, Math.max(4, candleWidth * .56), bodyHeight);
+        });
+
+        ctx.fillStyle = '#00e699';
+        ctx.font = '600 12px Inter, sans-serif';
+        ctx.fillText(`MT5 LOCAL | ${timeframe} | ${symbol}`, pad.left + 8, 18);
+        ctx.fillStyle = '#8b9bb4';
+        ctx.font = '11px Inter, sans-serif';
+        ctx.fillText('Broker candles and quote', pad.left + 8, height - 10);
+      } catch (error) {
+        console.error('MT5 chart load failed:', error);
+      }
+    }
+
+    // Initialize the local MT5 chart for gold. Other symbols retain TradingView.
     function initTradingViewWidget(symbol, interval) {
       const container = document.getElementById('tv_chart_container');
+      const normalizedSymbol = symbol.toUpperCase().trim();
+      if (normalizedSymbol === 'XAUUSD' || normalizedSymbol === 'GOLD') {
+        renderLocalMt5Chart(normalizedSymbol === 'GOLD' ? 'XAUUSD' : normalizedSymbol, interval);
+        return;
+      }
       // IMPORTANT: preserve the trade visualizer overlay child nodes
       const viz = document.getElementById('tradeVisualizer');
       container.innerHTML = '';
@@ -1413,6 +1505,11 @@
         if (res.ok) {
           const data = await res.json();
           const p = data.price;
+          const source = document.getElementById('marketSourceLabel');
+          if (source) {
+            source.innerText = data.source === 'MT5_LOCAL' ? 'SOURCE: MT5 LOCAL' : 'SOURCE: PUBLIC FEED';
+            source.style.color = data.source === 'MT5_LOCAL' ? 'var(--primary-accent)' : 'var(--warning)';
+          }
           document.getElementById('statBid').innerText = fmtPrice(data.bid);
           document.getElementById('statAsk').innerText = fmtPrice(data.ask);
           document.getElementById('statHigh').innerText = fmtPrice(data.high);
@@ -1432,7 +1529,7 @@
       } catch (err) {
         console.error('Failed to fetch live market stats:', err);
       }
-      // ALWAYS sync the header price from the latest closed candle
+      // MT5_LOCAL is the source of truth for the header and chart.
       await syncHeaderPrice(sym);
     }
 
@@ -1788,6 +1885,9 @@
     // still keeping the header price tag in sync with the latest candle close.
     setInterval(() => {
       updateLiveMarketTicker(currentSymbol);
+      if (currentSymbol === 'XAUUSD' || currentSymbol === 'GOLD') {
+        renderLocalMt5Chart('XAUUSD', currentTimeframe);
+      }
     }, 3000);
 
     // Initial Loading Calls

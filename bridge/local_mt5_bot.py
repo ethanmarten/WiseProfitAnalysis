@@ -188,10 +188,20 @@ def send_market_data(symbol: str = "XAUUSD") -> bool:
             for row in rates
         ]
 
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        log.warning("Cannot read live %s quote: %s", symbol, mt5.last_error())
+        return False
+    quote = {
+        "bid": float(tick.bid),
+        "ask": float(tick.ask),
+        "last": float(getattr(tick, "last", 0.0) or 0.0),
+    }
+
     try:
         response = _session.post(
             f"{RENDER_URL}/api/market-data",
-            json={"symbol": symbol, "timeframes": timeframes},
+            json={"symbol": symbol, "quote": quote, "timeframes": timeframes},
             timeout=REQUEST_TIMEOUT,
         )
         if response.status_code != 200:
