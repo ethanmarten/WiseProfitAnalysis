@@ -27,14 +27,14 @@ logger = logging.getLogger("gemini_analyzer")
 load_dotenv(Path(__file__).with_name(".env"))
 
 # Model is configurable; use the current model recommended by the API response.
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "Gemini 3.7 Flash")
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "Gemini 3.5 Flash")
 # Keep the current supported model as the only default. A fallback must be
 # explicitly configured because model availability differs between accounts.
 FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 MODEL_RETRIES = max(1, int(os.getenv("GEMINI_MODEL_RETRIES", "2")))
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant")
 _groq_models_cache: Optional[List[str]] = None
 
