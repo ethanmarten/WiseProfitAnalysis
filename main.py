@@ -289,6 +289,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(Exception)
+async def api_exception_handler(request: Request, exc: Exception):
+    """Keep API failures JSON-shaped so the dashboard can show the real cause."""
+    logger.error("Unhandled request error on %s %s: %s", request.method, request.url.path, exc, exc_info=True)
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "detail": "Internal server error while processing the request.",
+                "error_type": type(exc).__name__,
+            },
+        )
+    return JSONResponse(status_code=500, content={"detail": "Internal server error."})
+
 # ---------------------------------------------------------------------------
 # Static Files
 # ---------------------------------------------------------------------------
