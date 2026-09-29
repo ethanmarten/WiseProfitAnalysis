@@ -23,19 +23,18 @@ import os
 import sys
 import time
 import logging
+from pathlib import Path
 from typing import Optional, Dict, Any
 
 try:
     import MetaTrader5 as mt5
 except ImportError:
-    print("[X] MetaTrader5 package is not installed.")
-    print("    Run:  pip install MetaTrader5")
-    sys.exit(1)
+    mt5 = None
 
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"))
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -58,10 +57,7 @@ log = logging.getLogger("wp-bridge")
 _session = requests.Session()
 _session.headers.update({"User-Agent": "WiseProfit-Bridge/1.0"})
 last_processed_signal_id = None
-WP_EMAIL = os.getenv("WP_EMAIL", "").strip()
-WP_PASSWORD = os.getenv("WP_PASSWORD", "").strip()
-
-# Read dashboard credentials from environment (set in bridge/.env).
+# Credentials must come from bridge/.env or the process environment.
 WP_EMAIL = os.getenv("WP_EMAIL", "").strip()
 WP_PASSWORD = os.getenv("WP_PASSWORD", "").strip()
 
@@ -120,6 +116,9 @@ def _post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 def initialize_mt5() -> bool:
     """Connect to the locally installed MetaTrader 5 terminal."""
+    if mt5 is None:
+        log.error("MetaTrader5 is not installed. Run: pip install MetaTrader5")
+        return False
     if not mt5.initialize():
         log.error("MT5 initialize() failed: %s", mt5.last_error())
         return False
@@ -226,6 +225,14 @@ def execute_signal(signal: Dict[str, Any]) -> Dict[str, Any]:
         volume = round(volume / step) * step
     volume = float(round(volume, 2))
 
+    filling_mode = info.filling_mode
+    if filling_mode & mt5.ORDER_FILLING_IOC:
+        type_filling = mt5.ORDER_FILLING_IOC
+    elif filling_mode & mt5.ORDER_FILLING_FOK:
+        type_filling = mt5.ORDER_FILLING_FOK
+    else:
+        type_filling = mt5.ORDER_FILLING_RETURN
+
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
@@ -235,7 +242,7 @@ def execute_signal(signal: Dict[str, Any]) -> Dict[str, Any]:
         "magic": 100200,
         "comment": "WiseProfit_Bot",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": type_filling,
     }
     if sl:
         request["sl"] = float(sl)
@@ -342,6 +349,9 @@ def run_loop() -> None:
 
 
 def main() -> None:
+    if mt5 is None:
+        log.error("MetaTrader5 is not installed. Run: pip install MetaTrader5")
+        sys.exit(1)
     try:
         _login()
     except BridgeError as exc:

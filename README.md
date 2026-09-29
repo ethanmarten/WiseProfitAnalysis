@@ -47,6 +47,8 @@ gemini_mt5_saas/
 cd gemini_mt5_saas
 pip install -r requirements.txt
 ```
+On Windows, the same command installs the optional `MetaTrader5` package used by
+the local bridge.
 
 ### 2. Configure Environment Variables
 Set your Gemini API Key in your environment:
@@ -69,6 +71,26 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 1. Open your browser and navigate to `http://localhost:8000`.
 2. Sign in and optionally save your local MT5 login/server label.
 3. Start `bridge/local_mt5_bot.py` on the Windows computer running MT5.
+
+For local development, copy `.env.example` to `.env`, set `GEMINI_API_KEY`
+and `SECRET_KEY`, then run:
+
+```powershell
+python main.py
+```
+
+In a second terminal, configure the bridge once and keep it running:
+
+```powershell
+Copy-Item bridge\.env.example bridge\.env
+# edit bridge\.env and set WP_EMAIL and WP_PASSWORD
+python local\run_local.py
+```
+
+`local\run_local.py` is the compatibility entry point for the maintained
+bridge. It loads credentials from `bridge\.env`, uploads local candles, polls
+for signals, executes them through MT5, and acknowledges the result. Keep the
+MetaTrader 5 desktop terminal open and logged in before starting it.
 
 ---
 
