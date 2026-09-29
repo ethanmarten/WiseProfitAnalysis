@@ -12,16 +12,22 @@ import json
 import logging
 import re
 from random import uniform
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 import requests
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("gemini_analyzer")
 
+# Always load the repository .env, even when uvicorn is started from another
+# directory. Render continues to use its injected environment variables.
+load_dotenv(Path(__file__).with_name(".env"))
+
 # Model is configurable; use the current model recommended by the API response.
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 # Keep the current supported model as the only default. A fallback must be
 # explicitly configured because model availability differs between accounts.
 FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
@@ -191,11 +197,7 @@ class GeminiSMCAnalyzer:
         Returns a dictionary matching SMCTradeSignal.
         """
         # Attempt to pick up GEMINI_API_KEY dynamically if environment changed
-        try:
-            from dotenv import load_dotenv
-            load_dotenv(override=True)
-        except ImportError:
-            pass
+        load_dotenv(Path(__file__).with_name(".env"), override=True)
 
         env_key = os.getenv("GEMINI_API_KEY")
         if self._is_valid_key(env_key):

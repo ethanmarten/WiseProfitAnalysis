@@ -1475,7 +1475,7 @@
         }
       } catch (err) {
         console.error('Error analyzing symbol:', err);
-        document.getElementById('aiReasoningText').innerText = 'Analysis request failed. Check the server and API keys.';
+        document.getElementById('aiReasoningText').innerText = `Analysis request failed: ${err.message || 'Check the server and API keys.'}`;
         document.getElementById('analysisOutputCard').style.display = 'block';
       } finally {
         btn.disabled = false;
