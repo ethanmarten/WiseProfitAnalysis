@@ -361,7 +361,7 @@ class ToggleBotRequest(BaseModel):
 
 
 class SignalAckRequest(BaseModel):
-    claim_token: str = Field(..., min_length=8)
+    claim_token: Optional[str] = Field(default=None, min_length=8)
     status: str = Field(..., description="executed | failed")
     position_id: Optional[str] = None
     entry_price: Optional[float] = None
@@ -746,12 +746,15 @@ async def acknowledge_signal(
     if not row:
         raise HTTPException(status_code=404, detail="Signal not found.")
 
-    if not row.claim_token or row.claim_token != req.claim_token:
-        raise HTTPException(status_code=403, detail="Invalid claim token for this signal.")
-
     outcome = (req.status or "").lower().strip()
     if outcome not in ("executed", "failed"):
         raise HTTPException(status_code=400, detail="status must be 'executed' or 'failed'.")
+
+    if req.claim_token:
+        if not row.claim_token or row.claim_token != req.claim_token:
+            raise HTTPException(status_code=403, detail="Invalid claim token for this signal.")
+    elif outcome == "executed" and row.claim_token:
+        raise HTTPException(status_code=403, detail="A valid claim token is required for execution acknowledgements.")
 
     row.acknowledged_at = utcnow()
     row.execution_position_id = req.position_id
@@ -1688,7 +1691,11 @@ async def apply_analysis_signal(
     if not account or not account.bot_enabled:
         raise HTTPException(status_code=409, detail="Connect the local MT5 bridge before agreeing to a trade.")
 
-    status_value = "PENDING" if (user.trading_mode or "AUTO") == "AUTO" else "APPROVED"
+    # Manual mode requires an explicit approval decision before the signal becomes
+    # available to the local bridge. Keeping the row in PENDING state ensures the
+    # dashboard can render the Approve/Reject controls and the API can enforce
+    # this flow consistently.
+    status_value = "PENDING"
     pending = PendingSignal(
         user_id=user.id,
         symbol=analysis.symbol,
