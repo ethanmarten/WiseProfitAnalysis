@@ -23,6 +23,7 @@ import os
 import sys
 import time
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -58,8 +59,8 @@ _session = requests.Session()
 _session.headers.update({"User-Agent": "WiseProfit-Bridge/1.0"})
 last_processed_signal_id = None
 # Credentials must come from bridge/.env or the process environment.
-WP_EMAIL = os.getenv("WP_EMAIL", "ehabalhayekm@gmail.com").strip()
-WP_PASSWORD = os.getenv("WP_PASSWORD", "Ehab4820775+").strip()
+WP_EMAIL = os.getenv("WP_EMAIL", "").strip()
+WP_PASSWORD = os.getenv("WP_PASSWORD", "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -310,9 +311,60 @@ def execute_signal(signal: Dict[str, Any]) -> Dict[str, Any]:
     )
     return {
         "status": "executed",
-        "position_id": str(getattr(result, "order", "") or getattr(result, "position", "")),
+        "position_id": str(getattr(result, "position", "") or getattr(result, "order", "")),
         "entry_price": float(result.price),
     }
+
+
+def send_account_state() -> bool:
+    """Upload live MT5 positions and recently closed deals for PnL settlement."""
+    account = mt5.account_info()
+    if account is None:
+        return False
+
+    positions = []
+    for position in mt5.positions_get() or []:
+        positions.append({
+            "position_id": str(position.ticket),
+            "symbol": position.symbol,
+            "type": "BUY" if position.type == mt5.POSITION_TYPE_BUY else "SELL",
+            "volume": float(position.volume),
+            "open_price": float(position.price_open),
+            "sl": float(position.sl or 0.0),
+            "tp": float(position.tp or 0.0),
+            "profit": float(position.profit),
+        })
+
+    start = datetime.now() - timedelta(days=2)
+    deals = mt5.history_deals_get(start, datetime.now()) or []
+    closed_deals = []
+    for deal in deals:
+        if getattr(deal, "entry", None) != mt5.DEAL_ENTRY_OUT:
+            continue
+        closed_deals.append({
+            "position_id": str(getattr(deal, "position_id", "")),
+            "price": float(getattr(deal, "price", 0.0)),
+            "profit": float(getattr(deal, "profit", 0.0)) + float(getattr(deal, "swap", 0.0)) + float(getattr(deal, "commission", 0.0)),
+        })
+
+    try:
+        response = _session.post(
+            f"{RENDER_URL}/api/bridge/account-state",
+            json={
+                "balance": float(account.balance),
+                "equity": float(account.equity),
+                "positions": positions,
+                "closed_deals": closed_deals,
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        if response.status_code != 200:
+            log.warning("Account-state upload failed (%s): %s", response.status_code, response.text[:200])
+            return False
+        return True
+    except requests.RequestException as exc:
+        log.warning("Account-state upload network error: %s", exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +382,7 @@ def run_loop() -> None:
             if now - last_market_sync_time >= MARKET_DATA_INTERVAL:
                 if send_market_data(MT5_SYMBOL):
                     log.info("Uploaded fresh %s M1/M5/M15 candles to Render.", MT5_SYMBOL)
+                send_account_state()
                 last_market_sync_time = now
 
             payload = _get("/api/signals")

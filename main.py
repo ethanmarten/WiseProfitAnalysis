@@ -91,6 +91,7 @@ BACKGROUND_LOOP_ACTIVE = True
 # to a broker; the desktop terminal is the source of truth for XAUUSD candles.
 LOCAL_MARKET_DATA: Dict[str, Dict[str, Any]] = {}
 LOCAL_MARKET_DATA_MAX_AGE_SECONDS = int(os.getenv("LOCAL_MARKET_DATA_MAX_AGE_SECONDS", "90"))
+LOCAL_ACCOUNT_STATE: Dict[int, Dict[str, Any]] = {}
 
 BOT_LIVE_STATUS = {
     "step": "Initializing",
@@ -368,6 +369,13 @@ class SignalAckRequest(BaseModel):
     error: Optional[str] = None
 
 
+class BridgeAccountStateRequest(BaseModel):
+    balance: float = 0.0
+    equity: float = 0.0
+    positions: List[Dict[str, Any]] = Field(default_factory=list)
+    closed_deals: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 # --- REST API Endpoints ---
 
 @app.get("/", response_class=FileResponse)
@@ -543,8 +551,13 @@ async def get_dashboard_data(
     recent_trades = db.query(TradeLog).filter(TradeLog.user_id == user.id).order_by(TradeLog.executed_at.desc()).limit(10).all()
     recent_analyses = db.query(AnalysisLog).filter(AnalysisLog.user_id == user.id).order_by(AnalysisLog.analyzed_at.desc()).limit(6).all()
 
-    account_info = {"balance": 0.0, "equity": 0.0, "status": "Local MT5 bridge"}
-    open_positions = []
+    bridge_state = LOCAL_ACCOUNT_STATE.get(user.id) or {}
+    account_info = {
+        "balance": bridge_state.get("balance", 0.0),
+        "equity": bridge_state.get("equity", 0.0),
+        "status": "Local MT5 bridge",
+    }
+    open_positions = bridge_state.get("positions", [])
 
     return {
         "user_id": user.id,
@@ -779,8 +792,7 @@ async def acknowledge_signal(
         )
         db.add(trade)
         tracker = get_or_create_daily_tracker(db, user.id)
-        # Only increment if the engine hasn't counted this signal yet
-        # (engine pre-increments in bridge mode; this avoids double-counting).
+        tracker.daily_setup_count += 1
     else:
         row.status = "FAILED"
 
@@ -802,6 +814,8 @@ async def approve_manual_signal(
     ).first()
     if not row:
         raise HTTPException(status_code=404, detail="Signal not found.")
+    if user.trading_mode != "MANUAL":
+        raise HTTPException(status_code=409, detail="Manual approval is only available in MANUAL mode.")
 
     if row.status != "PENDING":
         raise HTTPException(status_code=409, detail=f"Signal already {row.status.lower()}.")
@@ -1534,6 +1548,54 @@ async def get_market_data(symbol: str):
     return fetch_live_market_data(symbol)
 
 
+@app.post("/api/bridge/account-state")
+async def receive_bridge_account_state(
+    req: BridgeAccountStateRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Store MT5 account/position state and settle closed trade logs."""
+    LOCAL_ACCOUNT_STATE[user.id] = {
+        "balance": req.balance,
+        "equity": req.equity,
+        "positions": req.positions,
+        "updated_at": datetime.now().timestamp(),
+    }
+
+    open_positions = {
+        str(item.get("position_id")): item
+        for item in req.positions
+        if item.get("position_id")
+    }
+    trades = db.query(TradeLog).filter(TradeLog.user_id == user.id).all()
+    tracker = get_or_create_daily_tracker(db, user.id)
+    unrealized = 0.0
+    for trade in trades:
+        position = open_positions.get(str(trade.position_id))
+        if position and trade.status == "OPEN":
+            trade.profit = float(position.get("profit", 0.0) or 0.0)
+            unrealized += trade.profit
+
+    for deal in req.closed_deals:
+        position_id = str(deal.get("position_id", ""))
+        trade = next((item for item in trades if str(item.position_id) == position_id), None)
+        if not trade or trade.status == "CLOSED":
+            continue
+        trade.profit = float(deal.get("profit", 0.0) or 0.0)
+        trade.status = "CLOSED"
+        trade.close_price = float(deal.get("price", 0.0) or 0.0) or None
+        trade.closed_at = utcnow()
+        tracker.realized_pnl += trade.profit
+
+    tracker.unrealized_pnl = unrealized
+    tracker.total_pnl = tracker.realized_pnl + tracker.unrealized_pnl
+    if tracker.total_pnl >= DAILY_PROFIT_TARGET:
+        tracker.target_cap_reached = True
+        tracker.is_locked_for_day = True
+    db.commit()
+    return {"success": True, "balance": req.balance, "equity": req.equity}
+
+
 @app.get("/api/candle-close/{symbol}")
 async def get_candle_close(symbol: str):
     """Returns the latest closed-candle close price from Binance klines.
@@ -1680,6 +1742,11 @@ async def apply_analysis_signal(
         raise HTTPException(status_code=409, detail="This analysis is HOLD and cannot be executed.")
     if not analysis.entry_price or not analysis.stop_loss or not analysis.take_profit:
         raise HTTPException(status_code=409, detail="Analysis has no valid entry, stop loss, and take profit.")
+    if user.trading_mode == "AUTO" and analysis.confidence < MIN_SIGNAL_CONFIDENCE:
+        raise HTTPException(
+            status_code=409,
+            detail=f"AUTO mode requires confidence of at least {MIN_SIGNAL_CONFIDENCE:.0%}.",
+        )
 
     tracker = get_or_create_daily_tracker(db, user.id)
     if tracker.target_cap_reached or tracker.total_pnl >= DAILY_PROFIT_TARGET:
@@ -1691,11 +1758,9 @@ async def apply_analysis_signal(
     if not account or not account.bot_enabled:
         raise HTTPException(status_code=409, detail="Connect the local MT5 bridge before agreeing to a trade.")
 
-    # Manual mode requires an explicit approval decision before the signal becomes
-    # available to the local bridge. Keeping the row in PENDING state ensures the
-    # dashboard can render the Approve/Reject controls and the API can enforce
-    # this flow consistently.
-    status_value = "PENDING"
+    # Clicking Agree is the explicit approval step in MANUAL mode. AUTO mode can
+    # queue this signal immediately after analysis without another click.
+    status_value = "APPROVED"
     pending = PendingSignal(
         user_id=user.id,
         symbol=analysis.symbol,
@@ -1713,7 +1778,6 @@ async def apply_analysis_signal(
         expires_at=utcnow() + timedelta(seconds=PENDING_SIGNAL_TTL_SECONDS),
     )
     db.add(pending)
-    tracker.daily_setup_count += 1
     db.commit()
     db.refresh(pending)
     return {
@@ -1925,7 +1989,6 @@ async def run_trading_engine_loop():
                                 expires_at=utcnow() + timedelta(seconds=PENDING_SIGNAL_TTL_SECONDS),
                             )
                             db.add(pending)
-                            tracker.daily_setup_count += 1
                             db.commit()
                             db.refresh(pending)
 
@@ -1978,7 +2041,6 @@ async def run_trading_engine_loop():
                                 expires_at=utcnow() + timedelta(seconds=PENDING_SIGNAL_TTL_SECONDS),
                             )
                             db.add(pending)
-                            tracker.daily_setup_count += 1
                             db.commit()
                             update_bot_status(
                                 "Signal Queued",

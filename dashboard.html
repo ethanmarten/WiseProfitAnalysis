@@ -1592,6 +1592,10 @@
         if (res.ok) {
           displayAIAnalysisResult(data);
           fetchDashboardData();
+          if ((localStorage.getItem('trading_mode') || 'AUTO') === 'AUTO' &&
+              (data.action === 'BUY' || data.action === 'SELL')) {
+            await agreeToAnalysis();
+          }
         } else {
           const errorCode = data.error_type ? ` [${data.error_type}]` : '';
           const errorMessage = data.error_message ? ` ${data.error_message}` : '';
@@ -1652,9 +1656,11 @@
       currentAnalysisId = data.analysis_id || null;
       const approvalControls = document.getElementById('analysisApprovalControls');
       const approvalStatus = document.getElementById('analysisApprovalStatus');
-      const canApply = currentAnalysisId && (data.action === 'BUY' || data.action === 'SELL');
+      const isManualMode = (localStorage.getItem('trading_mode') || 'AUTO') === 'MANUAL';
+      const canApply = isManualMode && currentAnalysisId && (data.action === 'BUY' || data.action === 'SELL');
       approvalControls.style.display = canApply ? 'block' : 'none';
-      approvalStatus.innerText = canApply ? 'No order will be sent until you press Agree.' : '';
+      approvalStatus.innerText = canApply ? 'No order will be sent until you press Agree.' :
+        (data.action === 'BUY' || data.action === 'SELL' ? 'AUTO mode: sending the approved setup to the MT5 bridge.' : '');
       document.getElementById('agreeAnalysisBtn').disabled = false;
       document.getElementById('refuseAnalysisBtn').disabled = false;
 
@@ -1757,7 +1763,7 @@
         }
 
         // Setup Counter
-        document.getElementById('setupCounter').innerText = `${data.daily_setup_count} / 5`;
+        document.getElementById('setupCounter').innerText = `${data.daily_setup_count} / ${data.max_daily_setups || 5}`;
 
         // Account Info
         if (data.account) {
@@ -1772,7 +1778,7 @@
         if (data.open_positions && data.open_positions.length > 0) {
           const pos = data.open_positions[0];
           visualizerTrade = {
-            entry_price: pos.openPrice,
+            entry_price: pos.openPrice || pos.open_price,
             stop_loss: pos.sl,
             take_profit: pos.tp,
             type: pos.type,
@@ -1809,7 +1815,7 @@
               <td>$${(t.sl || 0).toFixed(2)}</td>
               <td>$${(t.tp || 0).toFixed(2)}</td>
               <td style="color:${t.profit >= 0 ? 'var(--primary-accent)' : 'var(--danger)'}; font-weight:700;">
-                $${t.profit.toFixed(2)}
+                ${t.profit >= 0 ? '+' : '-'}$${Math.abs(t.profit).toFixed(2)}
               </td>
               <td>${t.status}</td>
             </tr>
@@ -2019,7 +2025,7 @@
           return;
         }
         fetchDashboardData();
-        showToast('Signal approved and trade executed!', 'success');
+        showToast('Signal approved and queued for MT5 execution.', 'success');
       } catch (err) {
         showToast('Error communicating with server', 'error');
         console.error(err);
