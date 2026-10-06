@@ -1775,9 +1775,9 @@ async def apply_analysis_signal(
     if not account or not account.bot_enabled:
         raise HTTPException(status_code=409, detail="Connect the local MT5 bridge before agreeing to a trade.")
 
-    # Clicking Agree is the explicit approval step in MANUAL mode. AUTO mode can
-    # queue this signal immediately after analysis without another click.
-    status_value = "APPROVED"
+    # AUTO signals are consumed from PENDING by the bridge. In MANUAL mode,
+    # clicking Agree is already the explicit approval step, so mark it APPROVED.
+    status_value = "PENDING" if user.trading_mode == "AUTO" else "APPROVED"
     pending = PendingSignal(
         user_id=user.id,
         symbol=analysis.symbol,

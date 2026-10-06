@@ -59,8 +59,8 @@ _session = requests.Session()
 _session.headers.update({"User-Agent": "WiseProfit-Bridge/1.0"})
 last_processed_signal_id = None
 # Credentials must come from bridge/.env or the process environment.
-WP_EMAIL = os.getenv("WP_EMAIL", "ehabalhayekm@gmail.com").strip()
-WP_PASSWORD = os.getenv("WP_PASSWORD", "Ehab4820775+").strip()
+WP_EMAIL = os.getenv("WP_EMAIL", "").strip()
+WP_PASSWORD = os.getenv("WP_PASSWORD", "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +388,7 @@ def run_loop() -> None:
             payload = _get("/api/signals")
             sig = payload.get("signal")
             if sig:
+                log.info("Received signal #%s: %s %s", sig.get("id"), sig.get("action"), sig.get("symbol"))
                 signal_id = str(sig.get("id"))
                 if signal_id != str(last_processed_signal_id):
                     log.info("New signal #%s: %s on %s", signal_id, sig["action"], sig["symbol"])
@@ -404,6 +405,8 @@ def run_loop() -> None:
                     )
                     last_processed_signal_id = signal_id
                     log.info("Signal #%s result: %s", signal_id, outcome["status"])
+            else:
+                log.debug("No executable signal available.")
 
             consecutive_failures = 0
 
