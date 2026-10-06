@@ -108,6 +108,10 @@ class MT5Account(Base):
     platform = Column(String(10), default="mt5")  # mt4 or mt5
     is_connected = Column(Boolean, default=False)
     bot_enabled = Column(Boolean, default=True)
+    account_balance = Column(Float, default=0.0)
+    account_equity = Column(Float, default=0.0)
+    open_positions_json = Column(Text, nullable=True)
+    state_updated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow)
 
     user = relationship("User", back_populates="mt5_account")
@@ -241,6 +245,19 @@ def _run_lightweight_migrations() -> None:
         logger.info("Migrating: adding users.trading_mode column.")
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE users ADD COLUMN trading_mode VARCHAR(10) DEFAULT 'AUTO'"))
+
+    if "mt5_accounts" in inspector.get_table_names():
+        existing_account = {col["name"] for col in inspector.get_columns("mt5_accounts")}
+        account_columns = {
+            "account_balance": "FLOAT DEFAULT 0",
+            "account_equity": "FLOAT DEFAULT 0",
+            "open_positions_json": "TEXT",
+            "state_updated_at": "TIMESTAMP",
+        }
+        with engine.begin() as conn:
+            for name, definition in account_columns.items():
+                if name not in existing_account:
+                    conn.execute(text(f"ALTER TABLE mt5_accounts ADD COLUMN {name} {definition}"))
 
     # pending_signals table is created by Base.metadata.create_all on first run;
     # on existing databases the lightweight migrations below backfill required

@@ -27,7 +27,7 @@ logger = logging.getLogger("gemini_analyzer")
 load_dotenv(Path(__file__).with_name(".env"))
 
 # Model is configurable; use the current model recommended by the API response.
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "Gemini 3.5 Flash")
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 # Keep the current supported model as the only default. A fallback must be
 # explicitly configured because model availability differs between accounts.
 FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
@@ -36,13 +36,14 @@ GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant")
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash")
 _groq_models_cache: Optional[List[str]] = None
 
 
 def resolve_gemini_model(model: str) -> str:
-    """Replace the unavailable legacy model named by older deployments."""
-    legacy_models = {"gemini-2.5-flash", "gemini-3.6-flash"}
-    return "gemini-3.8-flash" if model.strip() in legacy_models else model.strip()
+    """Normalize model names without silently inventing unavailable models."""
+    return model.strip()
 
 
 def resolve_groq_model(model: str) -> str:
@@ -147,6 +148,23 @@ class GeminiSMCAnalyzer:
         }
         return key.strip().lower() not in invalid_placeholders
 
+    @staticmethod
+    def _parse_json_object(content: Any) -> Dict[str, Any]:
+        """Parse a JSON object even when a provider wraps it in markdown text."""
+        text = str(content or "").strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            start, end = text.find("{"), text.rfind("}")
+            if start < 0 or end <= start:
+                raise ValueError("AI provider returned no complete JSON object")
+            value = json.loads(text[start:end + 1])
+        if not isinstance(value, dict):
+            raise ValueError("AI provider returned a non-object JSON response")
+        return value
+
     async def _analyze_with_groq(
         self,
         prompt: str,
@@ -164,23 +182,36 @@ class GeminiSMCAnalyzer:
         )
 
         def request_sync() -> Dict[str, Any]:
-            response = requests.post(
-                GROQ_API_URL,
-                headers={
-                    "Authorization": f"Bearer {groq_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
+            request_body = {
                     "model": selected_model,
                     "messages": [
                         {"role": "system", "content": system_instruction},
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.1,
+                    "max_completion_tokens": 900,
                     "response_format": {"type": "json_object"},
+                }
+            response = requests.post(
+                GROQ_API_URL,
+                headers={
+                    "Authorization": f"Bearer {groq_key}",
+                    "Content-Type": "application/json",
                 },
+                json=request_body,
                 timeout=45,
             )
+            if response.status_code == 400 and "json_validate_failed" in response.text:
+                request_body.pop("response_format", None)
+                response = requests.post(
+                    GROQ_API_URL,
+                    headers={
+                        "Authorization": f"Bearer {groq_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=request_body,
+                    timeout=45,
+                )
             if response.status_code >= 400:
                 raise RuntimeError(
                     f"Groq HTTP {response.status_code}: {response.text[:500]}"
@@ -189,13 +220,43 @@ class GeminiSMCAnalyzer:
             content = payload["choices"][0]["message"]["content"]
             if isinstance(content, list):
                 content = "".join(part.get("text", "") for part in content)
-            content = str(content).strip()
-            if content.startswith("```"):
-                content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            result = json.loads(content)
-            if not isinstance(result, dict):
-                raise ValueError("Groq returned a non-object JSON response")
-            return result
+            return self._parse_json_object(content)
+
+        result = await asyncio.to_thread(request_sync)
+        result.setdefault("reasoning", "")
+        return result
+
+    async def _analyze_with_openrouter(self, prompt: str, system_instruction: str) -> Dict[str, Any]:
+        """Use an optional OpenRouter model as a provider-independent fallback."""
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not self._is_valid_key(api_key):
+            raise RuntimeError("OPENROUTER_API_KEY is not configured")
+
+        def request_sync() -> Dict[str, Any]:
+            response = requests.post(
+                OPENROUTER_API_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "https://wiseprofitanalysis.onrender.com"),
+                    "X-Title": "WiseProfit",
+                },
+                json={
+                    "model": os.getenv("OPENROUTER_MODEL", OPENROUTER_MODEL),
+                    "messages": [
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 900,
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=45,
+            )
+            if response.status_code >= 400:
+                raise RuntimeError(f"OpenRouter HTTP {response.status_code}: {response.text[:500]}")
+            payload = response.json()
+            return self._parse_json_object(payload["choices"][0]["message"]["content"])
 
         result = await asyncio.to_thread(request_sync)
         result.setdefault("reasoning", "")
@@ -346,82 +407,56 @@ class GeminiSMCAnalyzer:
             signal_data["provider"] = "gemini"
 
         except Exception as gemini_error:
-            groq_key = os.getenv("GROQ_API_KEY")
-            if not self._is_valid_key(groq_key):
+            logger.warning("Gemini analysis failed; switching to Groq: %s", gemini_error)
+            provider_errors = [f"Gemini: {gemini_error}"]
+            signal_data = None
+            providers = [("groq", self._analyze_with_groq)]
+            if os.getenv("OPENROUTER_API_KEY"):
+                providers.append(("openrouter", self._analyze_with_openrouter))
+            for provider_name, provider_call in providers:
+                try:
+                    signal_data = await provider_call(prompt, system_instruction)
+                    signal_data["provider"] = provider_name
+                    break
+                except Exception as provider_error:
+                    provider_errors.append(f"{provider_name}: {provider_error}")
+                    logger.warning("%s analysis failed: %s", provider_name, provider_error)
+
+            if signal_data is None:
+                logger.error("All AI providers failed: %s", " | ".join(provider_errors))
                 return {
                     "action": "HOLD",
                     "confidence": 0.0,
                     "provider": "error",
-                    "reasoning": f"Gemini unavailable and GROQ_API_KEY is not configured: {gemini_error}",
+                    "reasoning": "No trade was opened. " + " | ".join(provider_errors),
                 }
-            logger.warning("Gemini analysis failed; switching to Groq: %s", gemini_error)
-            try:
-                signal_data = await self._analyze_with_groq(prompt, system_instruction)
-            except Exception as groq_error:
-                fallback_model = resolve_groq_model(os.getenv("GROQ_FALLBACK_MODEL", GROQ_FALLBACK_MODEL))
-                if fallback_model and fallback_model != os.getenv("GROQ_MODEL", GROQ_MODEL):
-                    logger.warning("Configured Groq model failed; trying fallback %s: %s", fallback_model, groq_error)
-                    try:
-                        signal_data = await self._analyze_with_groq(
-                            prompt,
-                            system_instruction,
-                            model_name=fallback_model,
-                        )
-                    except Exception as fallback_error:
-                        logger.error("All AI providers failed: %s", fallback_error, exc_info=True)
-                        return {
-                            "action": "HOLD",
-                            "confidence": 0.0,
-                            "provider": "error",
-                            "reasoning": f"Gemini and Groq are temporarily unavailable. No trade was opened. {fallback_error}",
-                        }
+
+        # Validate geometry regardless of which provider returned the result.
+        action = signal_data.get("action", "HOLD").upper()
+        if action in ["BUY", "SELL"]:
+            entry = signal_data.get("entry_price") or current_price
+            sl = signal_data.get("stop_loss")
+            tp = signal_data.get("take_profit")
+
+            def reject(message: str) -> None:
+                signal_data["action"] = "HOLD"
+                signal_data["reasoning"] = str(signal_data.get("reasoning", "")) + f" [Rejected: {message}]"
+
+            if not sl or not tp:
+                reject("Missing SL or TP values")
+            elif action == "BUY" and (sl >= entry or tp <= entry):
+                reject("Invalid BUY SL/TP geometry")
+            elif action == "SELL" and (sl <= entry or tp >= entry):
+                reject("Invalid SELL SL/TP geometry")
+            else:
+                risk = abs(entry - sl)
+                reward = abs(tp - entry)
+                if risk <= 0:
+                    reject("Zero-distance stop loss")
                 else:
-                    logger.error("Groq analysis failed: %s", groq_error, exc_info=True)
-                    return {
-                        "action": "HOLD",
-                        "confidence": 0.0,
-                        "provider": "error",
-                        "reasoning": f"Groq is unavailable. No trade was opened. {groq_error}",
-                    }
-            signal_data["provider"] = "groq"
+                    actual_rr = reward / risk
+                    signal_data["risk_reward_ratio"] = round(actual_rr, 2)
+                    if actual_rr < MIN_RISK_REWARD:
+                        reject(f"Risk-reward {actual_rr:.2f} below minimum {MIN_RISK_REWARD}")
 
-            # Extra sanity check for Gold (XAUUSD) SL/TP boundaries
-            action = signal_data.get("action", "HOLD").upper()
-            if action in ["BUY", "SELL"]:
-                entry = signal_data.get("entry_price") or current_price
-                sl = signal_data.get("stop_loss")
-                tp = signal_data.get("take_profit")
-
-                def reject(message: str) -> None:
-                    signal_data["action"] = "HOLD"
-                    signal_data["reasoning"] += f" [Rejected: {message}]"
-
-                if not sl or not tp:
-                    reject("Missing SL or TP values")
-                elif action == "BUY" and (sl >= entry or tp <= entry):
-                    reject("Invalid BUY SL/TP geometry")
-                elif action == "SELL" and (sl <= entry or tp >= entry):
-                    reject("Invalid SELL SL/TP geometry")
-                else:
-                    # Independently verify the risk-to-reward ratio rather than
-                    # trusting the model's self-reported number.
-                    risk = abs(entry - sl)
-                    reward = abs(tp - entry)
-                    if risk <= 0:
-                        reject("Zero-distance stop loss")
-                    else:
-                        actual_rr = reward / risk
-                        signal_data["risk_reward_ratio"] = round(actual_rr, 2)
-                        if actual_rr < MIN_RISK_REWARD:
-                            reject(f"Risk-reward {actual_rr:.2f} below minimum {MIN_RISK_REWARD}")
-
-            return signal_data
-
-        except Exception as e:
-            logger.error(f"Error during Gemini SMC market analysis: {e}", exc_info=True)
-            return {
-                "action": "HOLD",
-                "confidence": 0.0,
-                "provider": "error",
-                "reasoning": f"Gemini API Analysis Error: {str(e)}"
-            }
+        return signal_data

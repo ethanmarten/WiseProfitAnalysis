@@ -552,6 +552,16 @@ async def get_dashboard_data(
     recent_analyses = db.query(AnalysisLog).filter(AnalysisLog.user_id == user.id).order_by(AnalysisLog.analyzed_at.desc()).limit(6).all()
 
     bridge_state = LOCAL_ACCOUNT_STATE.get(user.id) or {}
+    if not bridge_state and mt5_acc:
+        try:
+            persisted_positions = json.loads(mt5_acc.open_positions_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            persisted_positions = []
+        bridge_state = {
+            "balance": mt5_acc.account_balance or 0.0,
+            "equity": mt5_acc.account_equity or 0.0,
+            "positions": persisted_positions,
+        }
     account_info = {
         "balance": bridge_state.get("balance", 0.0),
         "equity": bridge_state.get("equity", 0.0),
@@ -1561,6 +1571,13 @@ async def receive_bridge_account_state(
         "positions": req.positions,
         "updated_at": datetime.now().timestamp(),
     }
+    account = db.query(MT5Account).filter(MT5Account.user_id == user.id).first()
+    if account:
+        account.account_balance = req.balance
+        account.account_equity = req.equity
+        account.open_positions_json = json.dumps(req.positions)
+        account.state_updated_at = utcnow()
+        account.is_connected = True
 
     open_positions = {
         str(item.get("position_id")): item

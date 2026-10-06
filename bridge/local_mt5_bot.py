@@ -59,8 +59,8 @@ _session = requests.Session()
 _session.headers.update({"User-Agent": "WiseProfit-Bridge/1.0"})
 last_processed_signal_id = None
 # Credentials must come from bridge/.env or the process environment.
-WP_EMAIL = os.getenv("WP_EMAIL", "").strip()
-WP_PASSWORD = os.getenv("WP_PASSWORD", "").strip()
+WP_EMAIL = os.getenv("WP_EMAIL", "ehabalhayekm@gmail.com").strip()
+WP_PASSWORD = os.getenv("WP_PASSWORD", "Ehab4820775+").strip()
 
 
 # ---------------------------------------------------------------------------
